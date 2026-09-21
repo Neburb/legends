@@ -1,0 +1,133 @@
+name: Build and publish private-source release
+
+on:
+  repository_dispatch:
+    types: [publish-legends]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-legends
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ${{ github.event.client_payload.source_sha }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out public release repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate dispatch payload
+        env:
+          SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
+          SOURCE_REPO: ${{ github.event.client_payload.source_repo }}
+        run: |
+          set -euo pipefail
+          test "$SOURCE_REPO" = "Neburb/gen1recomp-legends"
+          printf '%s\n' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+
+      - name: Check out private source commit
+        uses: actions/checkout@v4
+        with:
+          repository: Neburb/gen1recomp-legends
+          ref: ${{ github.event.client_payload.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Determine public release version
+        id: version
+        env:
+          SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          import re
+          import subprocess
+
+          semver = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+          tags = subprocess.run(
+              ["git", "tag", "-l", "v*"], capture_output=True, text=True,
+              check=True).stdout.splitlines()
+          released = sorted(
+              tuple(map(int, match.groups()))
+              for tag in tags
+              if (match := semver.match(tag))
+          )
+          manifest = json.loads(open("source/manifest.json", encoding="utf-8").read())
+          candidate = tuple(map(int, str(manifest["version"]).split(".")))
+          latest = released[-1] if released else None
+          if latest is None:
+              major, minor, patch = candidate
+              version = (major, minor, patch + 1)
+          elif candidate > latest:
+              version = candidate
+          else:
+              major, minor, patch = latest
+              version = (major, minor, patch + 1)
+          if version[2] > 99:
+              version = (version[0], version[1] + 1, 0)
+          text = "%d.%d.%d" % version
+          print(f"version={text}")
+          print(f"tag=v{text}")
+          print(f"source_sha={os.environ['SOURCE_SHA']}")
+          PY
+
+      - name: Build installable public ZIP
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          staging="$RUNNER_TEMP/legends-package"
+          mkdir -p "$staging" dist
+          git -C source archive "$SOURCE_SHA" | tar -x -C "$staging"
+          rm -rf "$staging/.github" "$staging/.git" "$staging/.gitattributes" \
+            "$staging/.gitignore" "$staging/.luarc.json"
+          python3 - "$staging/manifest.json" "$staging/main.lua" "$VERSION" <<'PY'
+          import json
+          import re
+          import sys
+          manifest_path, main_path, version = sys.argv[1:]
+          with open(manifest_path, encoding="utf-8") as fh:
+              manifest = json.load(fh)
+          manifest["version"] = version
+          manifest["github"] = "Neburb/legends"
+          with open(manifest_path, "w", encoding="utf-8") as fh:
+              json.dump(manifest, fh, indent=2, ensure_ascii=False)
+              fh.write("\n")
+          source = open(main_path, encoding="utf-8").read()
+          stamped, count = re.subn(
+              r'(mod\.exports\.version\s*=\s*")[^"]+(\")',
+              rf'\g<1>{version}\g<2>', source, count=1)
+          if count != 1:
+              raise SystemExit("main.lua mod version declaration not found")
+          open(main_path, "w", encoding="utf-8").write(stamped)
+          PY
+          (cd "$staging" && python3 tools/package.py --out "$GITHUB_WORKSPACE/dist")
+          generated="dist/stadium_realtime_combat_${VERSION}.zip"
+          test -s "$generated"
+          mv "$generated" "dist/stadium_realtime_combat-${VERSION}.zip"
+          (cd dist && sha256sum "stadium_realtime_combat-${VERSION}.zip" > SHA256SUMS.txt)
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --target main \
+            --title "Legends $VERSION" \
+            --notes "Automated package for private source commit $SOURCE_SHA.\n\nSource: https://github.com/Neburb/gen1recomp-legends/commit/$SOURCE_SHA" \
+            "dist/stadium_realtime_combat-${VERSION}.zip" \
+            dist/SHA256SUMS.txt
