@@ -136,11 +136,34 @@ jobs:
               owner: 'Neburb', repo: 'legends', per_page: 100,
               headers: {authorization: `Bearer ${process.env.PUBLIC_TOKEN}`},
             });
-            const prior = releases.find(r => !r.draft && (r.body || '').replace(/\\n/g, '\n').split(/\r?\n/).includes(`Source: ${sourceUrl}`));
+            const matches = releases.filter(r => (r.body || '').replace(/\\n/g, '\n').split(/\r?\n/).includes(`Source: ${sourceUrl}`));
+            const repair = r => new Error(`Source release needs recovery: ${r.html_url}; follow docs/release-recovery.md using this exact source SHA and existing tag.`);
+            // A failed upload can leave a draft/tag. Never allocate another version for it.
+            const draft = matches.find(r => r.draft);
+            if (draft) throw repair(draft);
+            if (matches.length > 1) throw repair(matches[0]);
+            const prior = matches[0];
             if (prior) {
-              const names = prior.assets.map(a => a.name);
-              if (!names.includes('SHA256SUMS.txt') || !names.some(n => /^stadium_realtime_combat-.*\.zip$/.test(n)))
-                throw new Error('Existing source release is incomplete; repair it explicitly');
+              if (!/^v\d+\.\d+\.\d+$/.test(prior.tag_name)) throw repair(prior);
+              const zipName = `stadium_realtime_combat-${prior.tag_name.slice(1)}.zip`;
+              const named = name => prior.assets.filter(a => a.name === name);
+              if (named(zipName).length !== 1 || named('SHA256SUMS.txt').length !== 1) throw repair(prior);
+              const zip = named(zipName)[0], sums = named('SHA256SUMS.txt')[0];
+              if (!(zip.size > 0 && sums.size > 0)) throw repair(prior);
+              const download = async asset => {
+                const {data} = await github.rest.repos.getReleaseAsset({
+                  owner: 'Neburb', repo: 'legends', asset_id: asset.id,
+                  headers: {authorization: `Bearer ${process.env.PUBLIC_TOKEN}`, accept: 'application/octet-stream'},
+                });
+                const bytes = Buffer.from(data);
+                if (bytes.length !== asset.size) throw repair(prior);
+                return bytes;
+              };
+              const checksum = (await download(sums)).toString('utf8').trim();
+              const expected = checksum.match(/^([0-9a-f]{64}) [ *]([^\r\n]+)$/);
+              if (!expected || expected[2] !== zipName) throw repair(prior);
+              const digest = require('node:crypto').createHash('sha256').update(await download(zip)).digest('hex');
+              if (digest !== expected[1]) throw repair(prior);
               core.info(`Already published ${sha}: ${prior.html_url}`);
               core.setOutput('allowed', 'false');
               return;
