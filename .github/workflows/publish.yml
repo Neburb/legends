@@ -117,7 +117,47 @@ jobs:
           mv "$generated" "dist/stadium_realtime_combat-${VERSION}.zip"
           (cd dist && sha256sum "stadium_realtime_combat-${VERSION}.zip" > SHA256SUMS.txt)
 
+      - name: Check freshness and duplicate source at publication boundary
+        id: boundary
+        uses: actions/github-script@v7
+        env:
+          SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
+          SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          PUBLIC_TOKEN: ${{ github.token }}
+        with:
+          github-token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          script: |
+            const sha = process.env.SOURCE_SHA;
+            if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('Invalid source SHA');
+            if (process.env.SOURCE_REF !== 'refs/heads/main') throw new Error('Invalid source ref');
+            // Public releases identify the immutable source snapshot in their existing notes.
+            const sourceUrl = `https://github.com/Neburb/gen1recomp-legends/commit/${sha}`;
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: 'Neburb', repo: 'legends', per_page: 100,
+              headers: {authorization: `Bearer ${process.env.PUBLIC_TOKEN}`},
+            });
+            const prior = releases.find(r => !r.draft && (r.body || '').replace(/\\n/g, '\n').split(/\r?\n/).includes(`Source: ${sourceUrl}`));
+            if (prior) {
+              const names = prior.assets.map(a => a.name);
+              if (!names.includes('SHA256SUMS.txt') || !names.some(n => /^stadium_realtime_combat-.*\.zip$/.test(n)))
+                throw new Error('Existing source release is incomplete; repair it explicitly');
+              core.info(`Already published ${sha}: ${prior.html_url}`);
+              core.setOutput('allowed', 'false');
+              return;
+            }
+            // Check last, at the receiver boundary, including manual/retried dispatches.
+            const {data: branch} = await github.rest.repos.getBranch({
+              owner: 'Neburb', repo: 'gen1recomp-legends', branch: 'main',
+            });
+            if (branch.commit.sha !== sha) {
+              core.info(`Skip superseded source ${sha}; main is ${branch.commit.sha}`);
+              core.setOutput('allowed', 'false');
+              return;
+            }
+            core.setOutput('allowed', 'true');
+
       - name: Publish GitHub Release
+        if: steps.boundary.outputs.allowed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
