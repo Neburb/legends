@@ -162,12 +162,31 @@ jobs:
               const checksum = (await download(sums)).toString('utf8').trim();
               const expected = checksum.match(/^([0-9a-f]{64}) [ *]([^\r\n]+)$/);
               if (!expected || expected[2] !== zipName) throw repair(prior);
-              const digest = require('node:crypto').createHash('sha256').update(await download(zip)).digest('hex');
+              const zipBytes = await download(zip);
+              const digest = require('node:crypto').createHash('sha256').update(zipBytes).digest('hex');
               if (digest !== expected[1]) throw repair(prior);
+              try {
+                require('node:child_process').execFileSync(
+                  process.platform === 'win32' ? 'python' : 'python3',
+                  ['scripts/verify_release_archive.py', '-', prior.tag_name.slice(1)],
+                  {input: zipBytes, stdio: ['pipe', 'pipe', 'pipe']},
+                );
+              } catch (error) {
+                core.info(`Archive verification failed: ${error.message}`);
+                throw repair(prior);
+              }
               core.info(`Already published ${sha}: ${prior.html_url}`);
               core.setOutput('allowed', 'false');
               return;
             }
+            // The allocator counts tags too; a tag without a release needs reconciliation.
+            const tags = await github.paginate(github.rest.repos.listTags, {
+              owner: 'Neburb', repo: 'legends', per_page: 100,
+              headers: {authorization: `Bearer ${process.env.PUBLIC_TOKEN}`},
+            });
+            const orphan = tags.find(t => /^v\d+\.\d+\.\d+$/.test(t.name)
+              && !releases.some(r => r.tag_name === t.name));
+            if (orphan) throw new Error(`Release tag needs reconciliation: ${orphan.name} has no release; follow docs/release-recovery.md before allocating a version.`);
             // Check last, at the receiver boundary, including manual/retried dispatches.
             const {data: branch} = await github.rest.repos.getBranch({
               owner: 'Neburb', repo: 'gen1recomp-legends', branch: 'main',

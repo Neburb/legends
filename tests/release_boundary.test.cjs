@@ -3,22 +3,31 @@ const {test} = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const {execFileSync} = require('node:child_process');
 const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/publish.yml'), 'utf8').replaceAll('\r\n', '\n');
 const guard = workflow.match(/        id: boundary[\s\S]*?          script: \|\n([\s\S]*?)\n      - name: Publish GitHub Release/)[1].split('\n').map(line => line.slice(12)).join('\n');
 assert.match(workflow, /if: steps\.boundary\.outputs\.allowed == 'true'/);
 const run = new (Object.getPrototypeOf(async function() {}).constructor)('github', 'core', 'require', guard);
 const sha = 'a'.repeat(40), newer = 'b'.repeat(40);
 const zipName = 'stadium_realtime_combat-0.0.75.zip';
-const zipData = Buffer.from('fixture archive bytes');
+function makeZip({manifestVersion='0.0.75',mainVersion='0.0.75',githubRepo='Neburb/legends',missingManifest=false,duplicate=false}={}) {
+  const files={'manifest.json':JSON.stringify({id:'stadium_realtime_combat',entry:'main.lua',version:manifestVersion,github:githubRepo}),
+    'main.lua':`return function(mod) mod.exports.version="${mainVersion}" end`,'fixture.txt':'crc fixture payload'};
+  if(missingManifest) delete files['manifest.json'];
+  return execFileSync(process.platform==='win32'?'python':'python3',['-c',
+    'import io,json,sys,zipfile; b=io.BytesIO(); z=zipfile.ZipFile(b,"w",zipfile.ZIP_STORED); v=json.load(sys.stdin); [z.writestr(k,s) for k,s in v["files"].items()]; z.writestr("manifest.json",v["files"]["manifest.json"]) if v["duplicate"] else None; z.close(); sys.stdout.buffer.write(b.getvalue())'],
+    {input:JSON.stringify({files,duplicate})});
+}
+const zipData = makeZip();
 const sumsData = Buffer.from(`${crypto.createHash('sha256').update(zipData).digest('hex')}  ${zipName}\n`);
 const prior = {draft:false, tag_name:'v0.0.75', body:`Automated package\n\nSource: https://github.com/Neburb/gen1recomp-legends/commit/${sha}`,
   assets:[{id:1,name:'SHA256SUMS.txt',size:sumsData.length},{id:2,name:zipName,size:zipData.length}],html_url:'https://example.test/release/v0.0.75'};
-async function check({current=sha, releases=[], allowed, rejects, assets={1:sumsData,2:zipData}, sourceSha=sha, sourceRef='refs/heads/main'}) {
+async function check({current=sha, releases=[], tags=[], allowed, rejects, assets={1:sumsData,2:zipData}, sourceSha=sha, sourceRef='refs/heads/main'}) {
   process.env.SOURCE_SHA=sourceSha; process.env.SOURCE_REF=sourceRef; process.env.PUBLIC_TOKEN='mock-public-read';
   let branchCalls=0, output;
-  const github={rest:{repos:{listReleases:()=>{},getBranch:async()=>{branchCalls++;return {data:{commit:{sha:current}}}},
+  const github={rest:{repos:{listReleases:()=>{},listTags:()=>{},getBranch:async()=>{branchCalls++;return {data:{commit:{sha:current}}}},
     getReleaseAsset:async options=>{assert.equal(options.headers.authorization,'Bearer mock-public-read');assert.equal(options.headers.accept,'application/octet-stream');const bytes=assets[options.asset_id];return {data:bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)}}}},
-    paginate:async(fn,options)=>{assert.equal(options.headers.authorization,'Bearer mock-public-read');return releases}};
+    paginate:async(fn,options)=>{assert.equal(options.headers.authorization,'Bearer mock-public-read');return fn===github.rest.repos.listTags?tags:releases}};
   const core={info:()=>{},setOutput:(name,value)=>{assert.equal(name,'allowed');output=value}};
   if(rejects) {await assert.rejects(run(github,core,require),rejects);assert.equal(output,undefined)}
   else {await run(github,core,require);assert.equal(output,allowed)}
@@ -30,6 +39,20 @@ test('publication boundary handles freshness and rejects damaged retries',async 
   await t.test('complete retry verifies bytes and avoids branch lookup',async()=>assert.equal(await check({releases:[prior],allowed:'false'}),0));
   await t.test('legacy literal newline notes are recognized',()=>check({releases:[{...prior,body:prior.body.replaceAll('\n','\\n')}],allowed:'false'}));
   const recovery = /Source release needs recovery: https:\/\/example.test\/release\/v0.0.75; follow docs\/release-recovery.md/;
+  const archiveCheck = data => {
+    const sum=Buffer.from(`${crypto.createHash('sha256').update(data).digest('hex')}  ${zipName}\n`);
+    return {releases:[{...prior,assets:prior.assets.map(a=>({...a,size:a.id===1?sum.length:data.length}))}],assets:{1:sum,2:data},rejects:recovery};
+  };
+  await t.test('orphan semver tag blocks a new version',()=>check({tags:[{name:'v0.0.75'}],rejects:/Release tag needs reconciliation: v0.0.75/}));
+  await t.test('tag belonging to another source release permits current publication',()=>check({tags:[{name:'v0.0.75'}],releases:[{...prior,body:prior.body.replace(sha,newer)}],allowed:'true'}));
+  await t.test('nonrelease tags do not block allocation',()=>check({tags:[{name:'backup-source'}],allowed:'true'}));
+  await t.test('matching checksum of invalid archive still needs recovery',()=>check(archiveCheck(Buffer.from('not a zip'))));
+  await t.test('wrong embedded manifest version needs recovery',()=>check(archiveCheck(makeZip({manifestVersion:'0.0.74'}))));
+  await t.test('wrong embedded main version needs recovery',()=>check(archiveCheck(makeZip({mainVersion:'0.0.74'}))));
+  await t.test('wrong embedded public repo needs recovery',()=>check(archiveCheck(makeZip({githubRepo:'Neburb/gen1recomp-legends'}))));
+  await t.test('missing root manifest needs recovery',()=>check(archiveCheck(makeZip({missingManifest:true}))));
+  await t.test('duplicate archive members need recovery',()=>check(archiveCheck(makeZip({duplicate:true}))));
+  await t.test('matching digest cannot hide corrupt CRC',()=>{const corrupt=Buffer.from(zipData);const offset=corrupt.indexOf('crc fixture payload');assert(offset>=0);corrupt[offset]^=1;return check(archiveCheck(corrupt))});
   await t.test('matching draft blocks allocation with recovery URL',()=>check({releases:[{...prior,draft:true}],rejects:recovery}));
   await t.test('matching draft blocks even alongside a published release',()=>check({releases:[prior,{...prior,draft:true}],rejects:recovery}));
   await t.test('duplicate published sources require recovery',()=>check({releases:[prior,prior],rejects:recovery}));
