@@ -47,7 +47,13 @@ print('orphan' if release is None else 'draft' if release['draft'] else 'publish
 PY
 )"
 printf 'Recovery branch: %s\n' "$RELEASE_KIND"
-if [ "$RELEASE_KIND" != orphan ]; then
+ASSET_COUNT="$(python3 - "$RECOVERY_DIR/release-before.json" <<'PY'
+import json, sys
+release = json.load(open(sys.argv[1]))
+print(len(release['assets']) if release else 0)
+PY
+)"
+if [ "$ASSET_COUNT" -gt 0 ]; then
   gh release download "$TAG" --repo Neburb/legends --dir "$DOWNLOADED_DIR"
 fi
 ```
@@ -57,6 +63,7 @@ HTTP 404 from the release endpoint as an orphan. Authentication, permission,
 network and other API errors stop the sequence. The tag lookup above must succeed.
 For an orphan retain the tag record and prove provenance before any write. Original
 assets of an existing release are backed up in DOWNLOADED_DIR before repair.
+A zero-asset draft has an intentionally empty backup; no download is attempted.
 
 ## Rebuild the existing version, without allocating one
 
@@ -109,6 +116,27 @@ package identity, public repository and both embedded versions. The checksum mus
 ZIP_NAME without a path prefix. Compare downloaded assets against the rebuild and
 investigate differences. Retain commands, hashes and validation output as evidence.
 
+## Pause and drain the publisher after operator approval
+
+Manual CLI commands do not participate in the workflow's `publish-legends`
+concurrency group. Pause the private dispatch producer and any manual dispatch
+sources; record payloads arriving during maintenance for later reconciliation.
+With separate operator approval to disable the public receiver, run:
+
+```bash
+gh workflow disable publish.yml --repo Neburb/legends
+python3 "$PUBLIC_DIR/scripts/verify_recovery_state.py" quiescent
+```
+
+Disabling prevents new receiver runs; it does not stop runs already queued or in
+progress. If the guard fails, inspect all receiver runs, wait for them to complete
+(or cancel them with operator approval and wait for completion), then repeat the
+guard. It checks every page and rejects every non-completed status, including
+queued/waiting/pending runs. Do not perform any release write until it succeeds.
+Keep the workflow disabled and dispatch sources paused throughout repair,
+rollback, verification and final publication. A failed step keeps maintenance
+active. The gates below check this again immediately before each write sequence.
+
 ## Manual repair after operator approval
 
 Use a maintenance window for an existing published release: notify consumers and
@@ -120,6 +148,7 @@ release as a draft, verifies that state, and then uploads. If hiding is rejected
 the API still reports published, stop without replacing assets.
 
 ```bash
+python3 "$PUBLIC_DIR/scripts/verify_recovery_state.py" quiescent
 if [ "$RELEASE_KIND" = published ]; then
   gh release edit "$TAG" --draft=true --repo Neburb/legends
 fi
@@ -129,6 +158,7 @@ if [ "$RELEASE_KIND" != orphan ]; then
 import json, sys
 assert json.load(open(sys.argv[1]))['draft'], 'release must be hidden before repair'
 PY
+  python3 "$PUBLIC_DIR/scripts/verify_recovery_state.py" metadata "$RECOVERY_DIR/hidden.json" "$TAG" "$SOURCE_SHA"
   gh release upload "$TAG" "$ZIP" "$SUMS" --clobber --repo Neburb/legends
 else
   printf 'Recovered package for private source commit %s.\n\nSource: https://github.com/Neburb/gen1recomp-legends/commit/%s\n' \
@@ -146,6 +176,7 @@ retry this recovery block after an interrupted upload:
 ```bash
 # Existing releases only. Do not run for a newly created orphan draft.
 test "$RELEASE_KIND" != orphan
+python3 "$PUBLIC_DIR/scripts/verify_recovery_state.py" quiescent
 python3 "$PUBLIC_DIR/scripts/inspect_recovery_release.py" "$TAG" > "$RECOVERY_DIR/hidden.json"
 python3 - "$RECOVERY_DIR/hidden.json" <<'PY'
 import json, sys
@@ -165,10 +196,20 @@ for asset in release['assets']:
 PY
 shopt -s nullglob
 ORIGINAL_ASSETS=("$DOWNLOADED_DIR"/*)
-test "${#ORIGINAL_ASSETS[@]}" -gt 0
-gh release upload "$TAG" "${ORIGINAL_ASSETS[@]}" --clobber --repo Neburb/legends
+if [ "${#ORIGINAL_ASSETS[@]}" -gt 0 ]; then
+  gh release upload "$TAG" "${ORIGINAL_ASSETS[@]}" --clobber --repo Neburb/legends
+fi
 ROLLBACK_DIR="$(mktemp -d "$RECOVERY_DIR/rollback.XXXXXX")"
-gh release download "$TAG" --repo Neburb/legends --dir "$ROLLBACK_DIR"
+if [ "${#ORIGINAL_ASSETS[@]}" -gt 0 ]; then
+  gh release download "$TAG" --repo Neburb/legends --dir "$ROLLBACK_DIR"
+else
+  python3 "$PUBLIC_DIR/scripts/inspect_recovery_release.py" "$TAG" > "$RECOVERY_DIR/rollback-empty.json"
+  python3 - "$RECOVERY_DIR/rollback-empty.json" <<'PY'
+import json, sys
+release = json.load(open(sys.argv[1]))
+assert release['draft'] and release['assets'] == [], 'empty original set must remain hidden and empty'
+PY
+fi
 python3 - "$DOWNLOADED_DIR" "$ROLLBACK_DIR" <<'PY'
 import pathlib, sys
 before, after = map(pathlib.Path, sys.argv[1:])
@@ -181,7 +222,16 @@ For an orphan draft, retain the draft for a verified retry instead of exposing i
 Rollback proves restoration, not health: if originals were damaged or incomplete,
 keep the release hidden and rebuild again. Only restore visibility after the full
 health checks below succeed and an operator approves publication. Preserve original
-notes/title/tag; do not replace notes on the existing-release branch.
+notes/title/tag. If the metadata gate reports a tag or Source mismatch, stop:
+retain the snapshot and reconcile it with the original dispatch/logs. Never
+change the recorded source to make the gate pass. A separately approved metadata
+correction may edit notes on this same hidden release using an audited notes file
+(`gh release edit "$TAG" --notes-file "$RECOVERY_DIR/approved-notes.md" --repo
+Neburb/legends`), with the publisher drained/disabled. Preserve unrelated notes.
+For a tag mismatch, investigate and obtain an explicit correction plan; do not
+move or replace tags as part of this procedure. Reinspect and rerun the metadata
+gate after any approved correction. This is additional repair authorization,
+not implied by an asset upload approval.
 
 Download to a fresh directory and verify the actual replacements, tag object and
 exact source line before approving publication:
@@ -194,14 +244,35 @@ unzip -t "$VERIFIED_DIR/$ZIP_NAME"
 python3 "$PUBLIC_DIR/scripts/verify_release_archive.py" "$VERIFIED_DIR/$ZIP_NAME" "$VERSION"
 gh api "repos/Neburb/legends/git/ref/tags/$TAG" > "$RECOVERY_DIR/tag-after.json"
 cmp "$RECOVERY_DIR/tag-before.json" "$RECOVERY_DIR/tag-after.json"
-gh release view "$TAG" --repo Neburb/legends --json tagName,isDraft,body,assets,url
+cmp "$ZIP" "$VERIFIED_DIR/$ZIP_NAME"
+cmp "$SUMS" "$VERIFIED_DIR/SHA256SUMS.txt"
+python3 "$PUBLIC_DIR/scripts/inspect_recovery_release.py" "$TAG" > "$RECOVERY_DIR/release-verified.json"
+python3 "$PUBLIC_DIR/scripts/verify_recovery_state.py" metadata "$RECOVERY_DIR/release-verified.json" "$TAG" "$SOURCE_SHA"
+python3 "$PUBLIC_DIR/scripts/verify_recovery_state.py" quiescent
 ```
+
+The comparisons require the uploaded bytes and checksum file to match the
+package rebuilt from the recorded source. A same-version, self-consistent package
+from another source fails this gate. Nonreproducible bytes also stop publication:
+investigate the build inputs and archive metadata, record hashes and differences,
+and obtain explicit approval for a revised verification plan before proceeding.
+Do not silently bypass `cmp` or equate internal consistency with source provenance.
+The metadata gate asserts the API's `tag_name` (the CLI's `tagName`) and exactly
+one full Source line, normalizing legacy literal `\n` separators.
 
 Finish the same draft only after these checks and explicit publication approval:
 
 ```bash
+python3 "$PUBLIC_DIR/scripts/verify_recovery_state.py" quiescent
 gh release edit "$TAG" --draft=false --repo Neburb/legends
 ```
+
+Reinspect the published release and retain the final tag/source/assets evidence.
+Reconcile interrupted runs and all dispatch payloads recorded during maintenance;
+do not replay unknown or stale sources. With operator approval, enable the
+receiver (`gh workflow enable publish.yml --repo Neburb/legends`) and resume the
+private producer/manual dispatch sources and consumers. Reconcile dispatches lost
+while the receiver was disabled before declaring maintenance complete.
 
 An operator may then retry the original dispatch with its original SHA and
 refs/heads/main. The boundary validates the repaired assets and skips publication.
