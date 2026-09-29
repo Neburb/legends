@@ -18,6 +18,8 @@ jobs:
           node-version: '20'
       - name: Test release publication boundary
         run: node --test tests/release_boundary.test.cjs
+      - name: Test recovery inspection
+        run: python3 tests/test_recovery_state.py
       - name: Validate workflow syntax
         env:
           ACTIONLINT_VERSION: '1.7.7'

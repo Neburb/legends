@@ -39,12 +39,24 @@ SUMS="$DIST_DIR/SHA256SUMS.txt"
 mkdir -p "$STAGING_DIR" "$DIST_DIR" "$DOWNLOADED_DIR"
 gh api "repos/Neburb/legends/git/ref/tags/$TAG" > "$RECOVERY_DIR/tag-before.json"
 gh run view "$RUN_ID" --repo Neburb/legends --log > "$RECOVERY_DIR/original-run.log"
-gh release view "$TAG" --repo Neburb/legends --json tagName,isDraft,body,assets,url
+python3 "$PUBLIC_DIR/scripts/inspect_recovery_release.py" "$TAG" > "$RECOVERY_DIR/release-before.json"
+RELEASE_KIND="$(python3 - "$RECOVERY_DIR/release-before.json" <<'PY'
+import json, sys
+release = json.load(open(sys.argv[1]))
+print('orphan' if release is None else 'draft' if release['draft'] else 'published')
+PY
+)"
+printf 'Recovery branch: %s\n' "$RELEASE_KIND"
+if [ "$RELEASE_KIND" != orphan ]; then
+  gh release download "$TAG" --repo Neburb/legends --dir "$DOWNLOADED_DIR"
+fi
 ```
 
-For an orphan, the last command reports release not found: retain the tag record
-and establish provenance before any write. For an existing release, download its
-assets separately: `gh release download "$TAG" --repo Neburb/legends --dir "$DOWNLOADED_DIR"`.
+The inspection helper confirms authenticated repository access and treats only an
+HTTP 404 from the release endpoint as an orphan. Authentication, permission,
+network and other API errors stop the sequence. The tag lookup above must succeed.
+For an orphan retain the tag record and prove provenance before any write. Original
+assets of an existing release are backed up in DOWNLOADED_DIR before repair.
 
 ## Rebuild the existing version, without allocating one
 
@@ -91,28 +103,85 @@ unzip -t "$ZIP"
 python3 "$PUBLIC_DIR/scripts/verify_release_archive.py" "$ZIP" "$VERSION"
 ```
 
-The validator checks CRCs, unique members, root manifest/main, package identity,
-public repository and both embedded versions. The checksum must be one line for
+The validator checks CRCs, regular safe member paths and package exclusions,
+complete internal SHA256SUMS coverage and every member digest, root manifest/main,
+package identity, public repository and both embedded versions. The checksum must be one line for
 ZIP_NAME without a path prefix. Compare downloaded assets against the rebuild and
 investigate differences. Retain commands, hashes and validation output as evidence.
 
 ## Manual repair after operator approval
 
-For an existing release, replace its assets without recreating its tag:
+Use a maintenance window for an existing published release: notify consumers and
+pause update/download jobs, record its original visibility and retain every original
+asset (including damaged ones) and release metadata. Direct cached download URLs
+may outlive hiding; do not promise atomic updates. Keep consumers paused until the
+replacement or rollback has been verified. This sequence first hides the same
+release as a draft, verifies that state, and then uploads. If hiding is rejected or
+the API still reports published, stop without replacing assets.
 
 ```bash
-gh release upload "$TAG" "$ZIP" "$SUMS" --clobber --repo Neburb/legends
+if [ "$RELEASE_KIND" = published ]; then
+  gh release edit "$TAG" --draft=true --repo Neburb/legends
+fi
+if [ "$RELEASE_KIND" != orphan ]; then
+  python3 "$PUBLIC_DIR/scripts/inspect_recovery_release.py" "$TAG" > "$RECOVERY_DIR/hidden.json"
+  python3 - "$RECOVERY_DIR/hidden.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))['draft'], 'release must be hidden before repair'
+PY
+  gh release upload "$TAG" "$ZIP" "$SUMS" --clobber --repo Neburb/legends
+else
+  printf 'Recovered package for private source commit %s.\n\nSource: https://github.com/Neburb/gen1recomp-legends/commit/%s\n' \
+    "$SOURCE_SHA" "$SOURCE_SHA" > "$RECOVERY_DIR/notes.md"
+  gh release create "$TAG" --verify-tag --draft --repo Neburb/legends \
+    --title "Legends $VERSION" --notes-file "$RECOVERY_DIR/notes.md" "$ZIP" "$SUMS"
+fi
 ```
 
-For a proven orphan only, create a draft on its existing tag. `--verify-tag`
-prevents creating a tag, and the notes retain the recorded private source:
+The orphan branch reuses the proven tag and never creates or moves a tag. For an
+upload interruption or verification failure, **leave the release hidden** and the
+maintenance window active. Restore the saved original assets to the same draft;
+retry this recovery block after an interrupted upload:
 
 ```bash
-printf 'Recovered package for private source commit %s.\n\nSource: https://github.com/Neburb/gen1recomp-legends/commit/%s\n' \
-  "$SOURCE_SHA" "$SOURCE_SHA" > "$RECOVERY_DIR/notes.md"
-gh release create "$TAG" --verify-tag --draft --repo Neburb/legends \
-  --title "Legends $VERSION" --notes-file "$RECOVERY_DIR/notes.md" "$ZIP" "$SUMS"
+# Existing releases only. Do not run for a newly created orphan draft.
+test "$RELEASE_KIND" != orphan
+python3 "$PUBLIC_DIR/scripts/inspect_recovery_release.py" "$TAG" > "$RECOVERY_DIR/hidden.json"
+python3 - "$RECOVERY_DIR/hidden.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))['draft']
+PY
+# Remove only newly introduced asset names before restoring the saved originals.
+python3 - "$PUBLIC_DIR/scripts/inspect_recovery_release.py" "$TAG" "$DOWNLOADED_DIR" <<'PY'
+import json, pathlib, subprocess, sys
+helper, tag, backup = sys.argv[1:]
+release = json.loads(subprocess.check_output(['python3', helper, tag], text=True))
+assert release['draft']
+saved = {p.name for p in pathlib.Path(backup).iterdir()}
+for asset in release['assets']:
+    if asset['name'] not in saved:
+        subprocess.run(['gh', 'release', 'delete-asset', tag, asset['name'], '--yes',
+                        '--repo', 'Neburb/legends'], check=True)
+PY
+shopt -s nullglob
+ORIGINAL_ASSETS=("$DOWNLOADED_DIR"/*)
+test "${#ORIGINAL_ASSETS[@]}" -gt 0
+gh release upload "$TAG" "${ORIGINAL_ASSETS[@]}" --clobber --repo Neburb/legends
+ROLLBACK_DIR="$(mktemp -d "$RECOVERY_DIR/rollback.XXXXXX")"
+gh release download "$TAG" --repo Neburb/legends --dir "$ROLLBACK_DIR"
+python3 - "$DOWNLOADED_DIR" "$ROLLBACK_DIR" <<'PY'
+import pathlib, sys
+before, after = map(pathlib.Path, sys.argv[1:])
+assert {p.name for p in before.iterdir()} == {p.name for p in after.iterdir()}
+assert all(p.read_bytes() == (after / p.name).read_bytes() for p in before.iterdir())
+PY
 ```
+
+For an orphan draft, retain the draft for a verified retry instead of exposing it.
+Rollback proves restoration, not health: if originals were damaged or incomplete,
+keep the release hidden and rebuild again. Only restore visibility after the full
+health checks below succeed and an operator approves publication. Preserve original
+notes/title/tag; do not replace notes on the existing-release branch.
 
 Download to a fresh directory and verify the actual replacements, tag object and
 exact source line before approving publication:
