@@ -14,7 +14,8 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import package_release
-from verify_release_source import verify_source
+import isolated_release
+CONTAINERS = unittest.skipUnless(os.environ.get("RUN_CONTAINER_TESTS")=="1", "Docker integration runs in Linux CI")
 from verify_release_archive import verify
 
 BASH = 'C:/Programas/Git/bin/bash.exe' if os.name == 'nt' else shutil.which('bash')
@@ -62,12 +63,13 @@ class Packaging(unittest.TestCase):
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @CONTAINERS
     def test_workflow_and_recovery_outputs_match(self):
         workflow = (ROOT / '.github/workflows/publish.yml').read_text()
         self.assertIn('python3 scripts/isolated_release.py', workflow)
-        run = 'python3 scripts/package_release.py --source source --source-sha "$SOURCE_SHA" --version "$VERSION" --out dist'
+        run = 'python3 scripts/isolated_release.py --source source --source-sha "$SOURCE_SHA" --version "$VERSION" --out dist'
         doc = (ROOT / 'docs/release-recovery.md').read_text()
-        recovery = re.search(r'python3 "\$RECIPE_DIR/scripts/package_release.py".*?--out "\$DIST_DIR"', doc, re.S)[0]
+        recovery = re.search(r'docker build -t legends-release-builder.*?python3 "\$RECIPE_DIR/scripts/isolated_release.py".*?--out "\$DIST_DIR"', doc, re.S)[0]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); source, sha = self.fixture(root)
             # Workflow uses relative source/scripts; recovery uses explicit isolated paths.
@@ -96,11 +98,12 @@ class Packaging(unittest.TestCase):
             with zipfile.ZipFile(package) as z:
                 self.assertEqual(z.read('payload.txt'), b'committed source')
 
+    @CONTAINERS
     def test_source_proof_matches_exact_commit_and_rejects_valid_other_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);source,sha=self.fixture(root)
             good=package_release.build(source,sha,VERSION,root/'good').read_bytes()
-            verify_source(good,source,sha,VERSION)
+            isolated_release.isolated_build(source,sha,VERSION,root/'unused',good)
             self.git(source,'add','payload.txt')
             self.git(source,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid',
                      'commit','-qm','different private source')
@@ -108,16 +111,17 @@ class Packaging(unittest.TestCase):
             wrong=package_release.build(source,other,VERSION,root/'wrong')
             verify(wrong,VERSION)  # Self-consistent versions, metadata and embedded checksums.
             with self.assertRaisesRegex(ValueError,'differs from the declared source'):
-                verify_source(wrong.read_bytes(),source,sha,VERSION)
-            verify_source(good,source,sha,VERSION)  # Later HEAD cannot change the pinned rebuild.
+                isolated_release.isolated_build(source,sha,VERSION,root/'unused',wrong.read_bytes())
+            isolated_release.isolated_build(source,sha,VERSION,root/'unused',good)  # Later HEAD cannot change the pinned rebuild.
             self.assertEqual((source/'payload.txt').read_text(),'uncommitted work must be ignored')
 
+    @CONTAINERS
     def test_source_proof_cli_and_missing_commit_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);source,sha=self.fixture(root)
             good=package_release.build(source,sha,VERSION,root/'good').read_bytes()
-            args=[sys.executable,str(ROOT/'scripts/verify_release_source.py'),
-                  '--source',str(source),'--source-sha',sha,'--version',VERSION]
+            args=[sys.executable,str(ROOT/'scripts/isolated_release.py'),
+                  '--source',str(source),'--source-sha',sha,'--version',VERSION,'--verify-stdin']
             completed=subprocess.run(args,input=good,capture_output=True)
             self.assertEqual(completed.returncode,0,completed.stderr)
             args[args.index(sha)]='f'*40
@@ -131,6 +135,7 @@ class Packaging(unittest.TestCase):
                     package_release.build(source,candidate,version,root/'out')
                 self.assertFalse((root/'out').exists())
 
+    @CONTAINERS
     def test_recovery_pins_recipe_from_original_run(self):
         doc = (ROOT / 'docs/release-recovery.md').read_text()
         start = doc.index('gh api "repos/Neburb/legends/actions/runs/$RUN_ID"')
@@ -145,8 +150,8 @@ class Packaging(unittest.TestCase):
             original=self.git(public,'rev-parse','HEAD')
             self.git(public,'remote','add','origin',str(public))
             # Today's recipe no longer builds these bytes; the original one must still work.
-            (public/'scripts/package_release.py').write_text('raise SystemExit("later recipe")\n')
-            self.git(public,'add','scripts/package_release.py')
+            (public/'scripts/isolated_release.py').write_text('raise SystemExit("later recipe")\n')
+            self.git(public,'add','scripts/isolated_release.py')
             self.git(public,*identity,'commit','-qm','later incompatible recipe')
             (root/'run-input.json').write_text(json.dumps(dict(path='.github/workflows/publish.yml',head_sha=original)))
             command='function gh(){ cat run-input.json; }\n'+doc[start:end]

@@ -95,8 +95,11 @@ PY
 git -C "$PUBLIC_DIR" fetch origin "$RECIPE_SHA"
 git -C "$PUBLIC_DIR" worktree add --detach "$RECIPE_DIR" "$RECIPE_SHA"
 test "$(git -C "$RECIPE_DIR" rev-parse HEAD)" = "$RECIPE_SHA"
-test -f "$RECIPE_DIR/scripts/package_release.py"
-python3 "$RECIPE_DIR/scripts/package_release.py" --source "$SOURCE_DIR" \
+# Stop if this historical recipe has no isolation boundary; never run its source tool on the host.
+test -f "$RECIPE_DIR/scripts/isolated_release.py"
+test -f "$RECIPE_DIR/scripts/release-container.Dockerfile"
+docker build -t legends-release-builder -f "$RECIPE_DIR/scripts/release-container.Dockerfile" "$RECIPE_DIR/scripts"
+python3 "$RECIPE_DIR/scripts/isolated_release.py" --source "$SOURCE_DIR" \
   --source-sha "$SOURCE_SHA" --version "$VERSION" --out "$DIST_DIR"
 
 test -s "$ZIP" && test -s "$SUMS"
@@ -326,7 +329,9 @@ A valid ZIP and matching checksums alone do not establish source provenance.
 Both automatic builds and retry reconstruction execute the private packager in a
 fresh Docker container as UID 65534, without network, capabilities, credentials,
 host process access or the runner workspace. Only read-only source and trusted
-recipe directories and an empty output directory are mounted. A 1 GiB memory
+recipe directories are mounted. `/out` is a 256 MiB tmpfs and `/tmp` a 768 MiB
+tmpfs; no writable host directory is mounted. Docker logging is disabled and the
+host reads at most 128 MiB plus one byte of ZIP output. A 1 GiB memory
 limit, 64-process limit and 300-second timeout bound execution; the host forcibly
 removes the named container after success or failure before a publication step
 can proceed. Host-side validation checks the output after container exit.
@@ -341,10 +346,8 @@ ratios above 1000 are unsupported. Oversized published assets stop with recovery
 before download (external checksum: 4 KiB). These failures require investigation;
 do not bypass the limits to declare a damaged release healthy.
 
-The manual pinned recipe commands above execute source-owned code directly.
-Run them on a dedicated unprivileged credential-free machine/container after
-fetching source, separate from the authenticated operator session used for repair.
-For recipe revisions containing isolated_release.py and release-container.Dockerfile,
-build the image from that same pinned recipe and use isolated_release.py with the
-same source/version/out arguments. Never mount credential stores, the Docker
-socket or the operator workspace into the source container.
+The manual commands build the image from the same pinned public recipe and use
+its isolated wrapper for the exact source/version. Historical recipes without an
+isolation boundary fail closed: stop and obtain an explicitly reviewed isolated
+recovery procedure for that recipe. Never execute private tools on the operator
+host or mount credential stores, the Docker socket or the operator workspace.

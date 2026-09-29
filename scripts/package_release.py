@@ -54,7 +54,7 @@ def build(source, source_sha, version, out):
         main_path.write_text(stamped, encoding='utf-8', newline='\n')
         built = Path(directory) / 'dist'
         subprocess.run([sys.executable, 'tools/package.py', '--out', str(built)],
-                       cwd=staging, check=True)
+                       cwd=staging, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         package = built / f'stadium_realtime_combat_{version}.zip'
         verify(package, version)
         data = package.read_bytes()
