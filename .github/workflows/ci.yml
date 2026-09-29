@@ -1,0 +1,41 @@
+name: Release receiver checks
+
+on:
+  pull_request:
+  push:
+    branches: [main, qa/release-freshness-idempotency]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Test release publication boundary
+        run: node --test tests/release_boundary.test.cjs
+      - name: Test recovery inspection
+        run: |
+          python3 tests/test_recovery_state.py
+          python3 tests/test_recovery_gates.py
+          python3 tests/test_package_release.py
+          python3 tests/test_archive_limits.py
+          python3 tests/test_isolated_release.py
+      - name: Exercise source isolation in real containers
+        run: |
+          docker build -t legends-release-builder -f scripts/release-container.Dockerfile scripts
+          RUN_CONTAINER_TESTS=1 python3 tests/test_isolated_release.py
+      - name: Validate workflow syntax
+        env:
+          ACTIONLINT_VERSION: '1.7.7'
+          ACTIONLINT_SHA256: '023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757'
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" -o "$RUNNER_TEMP/actionlint.tar.gz"
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes=
