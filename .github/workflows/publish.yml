@@ -47,6 +47,10 @@ jobs:
             core.setOutput('allowed', branch.commit.sha === process.env.SOURCE_SHA ? 'true' : 'false');
             if (branch.commit.sha !== process.env.SOURCE_SHA) core.info('Skip superseded source before build');
 
+      - name: Prepare trusted isolated packaging runtime
+        if: steps.source.outputs.allowed == 'true'
+        run: docker build -t legends-release-builder -f scripts/release-container.Dockerfile scripts
+
       - name: Check out private source commit
         if: steps.source.outputs.allowed == 'true'
         uses: actions/checkout@v4
@@ -106,7 +110,7 @@ jobs:
           SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
         run: |
           set -euo pipefail
-          python3 scripts/package_release.py --source source \
+          python3 scripts/isolated_release.py --source source \
             --source-sha "$SOURCE_SHA" --version "$VERSION" --out dist
 
       - name: Check freshness and duplicate source at publication boundary
@@ -144,7 +148,7 @@ jobs:
               const named = name => prior.assets.filter(a => a.name === name);
               if (prior.assets.length !== 2 || named(zipName).length !== 1 || named('SHA256SUMS.txt').length !== 1) throw repair(prior);
               const zip = named(zipName)[0], sums = named('SHA256SUMS.txt')[0];
-              if (!(zip.size > 0 && sums.size > 0)) throw repair(prior);
+              if (!(Number.isSafeInteger(zip.size) && zip.size > 0 && zip.size <= 128 * 1024 * 1024 && Number.isSafeInteger(sums.size) && sums.size > 0 && sums.size <= 4096)) throw repair(prior);
               const download = async asset => {
                 const {data} = await github.rest.repos.getReleaseAsset({
                   owner: 'Neburb', repo: 'legends', asset_id: asset.id,
@@ -163,10 +167,11 @@ jobs:
               try {
                 require('node:child_process').execFileSync(
                   process.platform === 'win32' ? 'python' : 'python3',
-                  ['scripts/verify_release_source.py', '--source', 'source', '--source-sha', sha,
-                   '--version', prior.tag_name.slice(1)],
+                  ['scripts/isolated_release.py', '--source', 'source', '--source-sha', sha,
+                   '--version', prior.tag_name.slice(1), '--verify-stdin'],
                   {input: zipBytes, stdio: ['pipe', 'pipe', 'pipe'],
-                   // The source-owned packager must not inherit github-script tokens.
+                   // Only the trusted host wrapper runs here; source code runs inside its
+                   // unprivileged container with no credentials, network or host processes.
                    env: Object.fromEntries(['PATH', 'SystemRoot', 'TEMP', 'TMP'].filter(
                      key => typeof process.env[key] === 'string').map(key => [key, process.env[key]]))},
                 );

@@ -64,7 +64,8 @@ class Packaging(unittest.TestCase):
 
     def test_workflow_and_recovery_outputs_match(self):
         workflow = (ROOT / '.github/workflows/publish.yml').read_text()
-        run = re.search(r'          python3 scripts/package_release.py.*?--out dist', workflow, re.S)[0].strip()
+        self.assertIn('python3 scripts/isolated_release.py', workflow)
+        run = 'python3 scripts/package_release.py --source source --source-sha "$SOURCE_SHA" --version "$VERSION" --out dist'
         doc = (ROOT / 'docs/release-recovery.md').read_text()
         recovery = re.search(r'python3 "\$RECIPE_DIR/scripts/package_release.py".*?--out "\$DIST_DIR"', doc, re.S)[0]
         with tempfile.TemporaryDirectory() as directory:

@@ -36,7 +36,7 @@ async function check({current=sha, releases=[], tags=[], allowed, rejects, asset
       if(args[0] === 'scripts/verify_release_archive.py') return execFileSync(python, args, options);
       assert.deepEqual(Object.keys(options.env).sort(), ['PATH', 'SystemRoot', 'TEMP', 'TMP'].filter(key=>typeof process.env[key]==='string').sort());
       assert.equal(options.env.PUBLIC_TOKEN,undefined);assert.equal(options.env.INPUT_GITHUB_TOKEN,undefined);
-      assert.deepEqual(args, ['scripts/verify_release_source.py', '--source', 'source', '--source-sha', sourceSha, '--version', '0.0.75']);
+      assert.deepEqual(args, ['scripts/isolated_release.py', '--source', 'source', '--source-sha', sourceSha, '--version', '0.0.75', '--verify-stdin']);
       execFileSync(python, ['scripts/verify_release_archive.py', '-', '0.0.75'], options);
       if(rebuildFails || !options.input.equals(trustedZip)) throw new Error('source rebuild mismatch');
     },
@@ -76,6 +76,12 @@ test('publication boundary handles freshness and rejects damaged retries',async 
     'absolute member':{extra:{'/escape.lua':'payload'}},
     'Windows member':{extra:{'C:/escape.lua':'payload'}},
     'backslash traversal':{extra:{'..\\escape.lua':'payload'}},
+    'nested env directory':{extra:{'config/.env.local/key':'secret'}},
+    'root env directory':{extra:{'.env/production':'secret'}},
+    'npm credentials':{extra:{'config/.npmrc':'secret'}},
+    'ssh key':{extra:{'.ssh/id_rsa':'secret'}},
+    'aws credentials':{extra:{'.aws/credentials':'secret'}},
+    'key extension':{extra:{'config/auth.key':'secret'}},
     'blocked layout':{extra:{'.git/config':'payload'}},
     'symlink member':{symlink:true},
   })) await t.test(name,()=>check(archiveCheck(makeZip(opts))));
@@ -85,6 +91,8 @@ test('publication boundary handles freshness and rejects damaged retries',async 
   await t.test('duplicate published sources require recovery',()=>check({releases:[prior,prior],rejects:recovery}));
   await t.test('missing assets require recovery',()=>check({releases:[{...prior,assets:[]}],rejects:recovery}));
   await t.test('wrong version ZIP requires recovery',()=>check({releases:[{...prior,assets:prior.assets.map(a=>a.id===2?{...a,name:'stadium_realtime_combat-0.0.76.zip'}:a)}],rejects:recovery}));
+  await t.test('oversized compressed ZIP stops before download',()=>check({releases:[{...prior,assets:prior.assets.map(a=>({...a,size:a.id===2?128*1024*1024+1:a.size}))}],assets:{},rejects:recovery}));
+  await t.test('oversized checksum stops before download',()=>check({releases:[{...prior,assets:prior.assets.map(a=>({...a,size:a.id===1?4097:a.size}))}],assets:{},rejects:recovery}));
   await t.test('zero size ZIP requires recovery',()=>check({releases:[{...prior,assets:prior.assets.map(a=>({...a,size:a.id===2?0:a.size}))}],rejects:recovery}));
   await t.test('invalid release tag requires recovery',()=>check({releases:[{...prior,tag_name:'other'}],rejects:recovery}));
   await t.test('checksum for different ZIP requires recovery',()=>check({releases:[prior],assets:{1:Buffer.from(sumsData.toString().replace('0.0.75','0.0.76')),2:zipData},rejects:recovery}));
@@ -96,12 +104,12 @@ test('publication boundary handles freshness and rejects damaged retries',async 
   await t.test('invalid source ref fails',()=>check({sourceRef:'refs/heads/other',rejects:/Invalid source ref/}));
   await t.test('invalid SHA fails',()=>check({sourceSha:'bad',rejects:/Invalid source SHA/}));
 });
-const preflight = workflow.match(/        id: source[\s\S]*?          script: \|\n([\s\S]*?)\n      - name: Check out private source commit/)[1].split('\n').map(line=>line.slice(12)).join('\n');
+const preflight = workflow.match(/        id: source[\s\S]*?          script: \|\n([\s\S]*?)\n      - name: Prepare trusted isolated packaging runtime/)[1].split('\n').map(line=>line.slice(12)).join('\n');
 const runPreflight = new (Object.getPrototypeOf(async function() {}).constructor)('github','core',preflight);
 test('private source cannot reach package execution before provenance succeeds',async t=>{
   const names=['Check out private source commit','Determine public release version','Build installable public ZIP','Check freshness and duplicate source at publication boundary'];
   for(const name of names) assert(workflow.includes(`      - name: ${name}\n        if: steps.source.outputs.allowed == 'true'`));
-  assert(workflow.indexOf('python3 scripts/package_release.py')>workflow.indexOf('id: source'));
+  assert(workflow.indexOf('python3 scripts/isolated_release.py')>workflow.indexOf('id: source'));
   const checkout=workflow.slice(workflow.indexOf('      - name: Check out public'),workflow.indexOf('      - name: Validate dispatch'));
   assert.match(checkout,/persist-credentials: false/);
   assert.match(workflow,/test "\$SOURCE_REF" = "refs\/heads\/main"/);

@@ -319,3 +319,32 @@ unavailable, the receiver stops with the existing recovery URL; it does not
 allocate another version or declare the prior release healthy. Use the original
 workflow run's pinned recipe and guarded recovery steps above to investigate.
 A valid ZIP and matching checksums alone do not establish source provenance.
+
+
+## Isolation and archive limits
+
+Both automatic builds and retry reconstruction execute the private packager in a
+fresh Docker container as UID 65534, without network, capabilities, credentials,
+host process access or the runner workspace. Only read-only source and trusted
+recipe directories and an empty output directory are mounted. A 1 GiB memory
+limit, 64-process limit and 300-second timeout bound execution; the host forcibly
+removes the named container after success or failure before a publication step
+can proceed. Host-side validation checks the output after container exit.
+
+The archive verifier rejects sensitive path components at every depth, including
+.env variants, .npmrc, .ssh, .aws/credentials and private-key suffixes. The limits
+are 128 MiB compressed, 512 MiB total uncompressed, 64 MiB per ordinary member,
+10,000 members and an 8 MiB central directory. Metadata has smaller caps:
+4 MiB embedded checksums, 64 KiB manifest and 1 MiB main.lua. Hashing streams
+64 KiB chunks and also checks CRCs. ZIP64/multi-disk archives and compression
+ratios above 1000 are unsupported. Oversized published assets stop with recovery
+before download (external checksum: 4 KiB). These failures require investigation;
+do not bypass the limits to declare a damaged release healthy.
+
+The manual pinned recipe commands above execute source-owned code directly.
+Run them on a dedicated unprivileged credential-free machine/container after
+fetching source, separate from the authenticated operator session used for repair.
+For recipe revisions containing isolated_release.py and release-container.Dockerfile,
+build the image from that same pinned recipe and use isolated_release.py with the
+same source/version/out arguments. Never mount credential stores, the Docker
+socket or the operator workspace into the source container.

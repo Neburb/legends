@@ -10,10 +10,12 @@ import sys
 import tempfile
 
 from package_release import build
-from verify_release_archive import verify
+from verify_release_archive import verify, read_bounded, MAX_ARCHIVE
 
 
 def verify_source(data, source, source_sha, version):
+    if len(data) > MAX_ARCHIVE:
+        raise ValueError('compressed ZIP exceeds size limit')
     with tempfile.TemporaryDirectory(prefix='legends-source-proof-') as directory:
         root = Path(directory)
         downloaded = root / 'downloaded.zip'
@@ -30,4 +32,4 @@ if __name__ == '__main__':
     parser.add_argument('--source-sha', required=True)
     parser.add_argument('--version', required=True)
     args = parser.parse_args()
-    verify_source(sys.stdin.buffer.read(), args.source, args.source_sha, args.version)
+    verify_source(read_bounded(sys.stdin.buffer, MAX_ARCHIVE), args.source, args.source_sha, args.version)

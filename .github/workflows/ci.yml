@@ -23,6 +23,12 @@ jobs:
           python3 tests/test_recovery_state.py
           python3 tests/test_recovery_gates.py
           python3 tests/test_package_release.py
+          python3 tests/test_archive_limits.py
+          python3 tests/test_isolated_release.py
+      - name: Exercise source isolation in real containers
+        run: |
+          docker build -t legends-release-builder -f scripts/release-container.Dockerfile scripts
+          RUN_CONTAINER_TESTS=1 python3 tests/test_isolated_release.py
       - name: Validate workflow syntax
         env:
           ACTIONLINT_VERSION: '1.7.7'
