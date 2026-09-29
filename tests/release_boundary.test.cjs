@@ -34,6 +34,8 @@ async function check({current=sha, releases=[], tags=[], allowed, rejects, asset
   const guardedRequire = name => name !== 'node:child_process' ? require(name) : {
     execFileSync: (python, args, options) => {
       if(args[0] === 'scripts/verify_release_archive.py') return execFileSync(python, args, options);
+      assert.deepEqual(Object.keys(options.env).sort(), ['PATH', 'SystemRoot', 'TEMP', 'TMP'].filter(key=>typeof process.env[key]==='string').sort());
+      assert.equal(options.env.PUBLIC_TOKEN,undefined);assert.equal(options.env.INPUT_GITHUB_TOKEN,undefined);
       assert.deepEqual(args, ['scripts/verify_release_source.py', '--source', 'source', '--source-sha', sourceSha, '--version', '0.0.75']);
       execFileSync(python, ['scripts/verify_release_archive.py', '-', '0.0.75'], options);
       if(rebuildFails || !options.input.equals(trustedZip)) throw new Error('source rebuild mismatch');

@@ -165,7 +165,10 @@ jobs:
                   process.platform === 'win32' ? 'python' : 'python3',
                   ['scripts/verify_release_source.py', '--source', 'source', '--source-sha', sha,
                    '--version', prior.tag_name.slice(1)],
-                  {input: zipBytes, stdio: ['pipe', 'pipe', 'pipe']},
+                  {input: zipBytes, stdio: ['pipe', 'pipe', 'pipe'],
+                   // The source-owned packager must not inherit github-script tokens.
+                   env: Object.fromEntries(['PATH', 'SystemRoot', 'TEMP', 'TMP'].filter(
+                     key => typeof process.env[key] === 'string').map(key => [key, process.env[key]]))},
                 );
               } catch (error) {
                 core.info(`Source package verification failed: ${error.message}`);
