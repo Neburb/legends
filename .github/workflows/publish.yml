@@ -129,7 +129,8 @@ jobs:
               owner: 'Neburb', repo: 'legends', per_page: 100,
               headers: {authorization: `Bearer ${process.env.PUBLIC_TOKEN}`},
             });
-            const matches = releases.filter(r => (r.body || '').replace(/\\n/g, '\n').split(/\r?\n/).includes(`Source: ${sourceUrl}`));
+            const sourceLines = r => (r.body || '').replace(/\\n/g, '\n').split(/\r?\n/).filter(line => /^Source:/.test(line));
+            const matches = releases.filter(r => sourceLines(r).includes(`Source: ${sourceUrl}`));
             const repair = r => new Error(`Source release needs recovery: ${r.html_url}; follow docs/release-recovery.md using this exact source SHA and existing tag.`);
             // A failed upload can leave a draft/tag. Never allocate another version for it.
             const draft = matches.find(r => r.draft);
@@ -137,10 +138,11 @@ jobs:
             if (matches.length > 1) throw repair(matches[0]);
             const prior = matches[0];
             if (prior) {
+              if (sourceLines(prior).length !== 1) throw repair(prior);
               if (!/^v\d+\.\d+\.\d+$/.test(prior.tag_name)) throw repair(prior);
               const zipName = `stadium_realtime_combat-${prior.tag_name.slice(1)}.zip`;
               const named = name => prior.assets.filter(a => a.name === name);
-              if (named(zipName).length !== 1 || named('SHA256SUMS.txt').length !== 1) throw repair(prior);
+              if (prior.assets.length !== 2 || named(zipName).length !== 1 || named('SHA256SUMS.txt').length !== 1) throw repair(prior);
               const zip = named(zipName)[0], sums = named('SHA256SUMS.txt')[0];
               if (!(zip.size > 0 && sums.size > 0)) throw repair(prior);
               const download = async asset => {
@@ -161,11 +163,12 @@ jobs:
               try {
                 require('node:child_process').execFileSync(
                   process.platform === 'win32' ? 'python' : 'python3',
-                  ['scripts/verify_release_archive.py', '-', prior.tag_name.slice(1)],
+                  ['scripts/verify_release_source.py', '--source', 'source', '--source-sha', sha,
+                   '--version', prior.tag_name.slice(1)],
                   {input: zipBytes, stdio: ['pipe', 'pipe', 'pipe']},
                 );
               } catch (error) {
-                core.info(`Archive verification failed: ${error.message}`);
+                core.info(`Source package verification failed: ${error.message}`);
                 throw repair(prior);
               }
               core.info(`Already published ${sha}: ${prior.html_url}`);

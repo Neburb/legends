@@ -14,6 +14,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import package_release
+from verify_release_source import verify_source
 from verify_release_archive import verify
 
 BASH = 'C:/Programas/Git/bin/bash.exe' if os.name == 'nt' else shutil.which('bash')
@@ -93,6 +94,33 @@ class Packaging(unittest.TestCase):
             package=package_release.build(source, sha, VERSION, root / 'out')
             with zipfile.ZipFile(package) as z:
                 self.assertEqual(z.read('payload.txt'), b'committed source')
+
+    def test_source_proof_matches_exact_commit_and_rejects_valid_other_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source,sha=self.fixture(root)
+            good=package_release.build(source,sha,VERSION,root/'good').read_bytes()
+            verify_source(good,source,sha,VERSION)
+            self.git(source,'add','payload.txt')
+            self.git(source,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid',
+                     'commit','-qm','different private source')
+            other=self.git(source,'rev-parse','HEAD')
+            wrong=package_release.build(source,other,VERSION,root/'wrong')
+            verify(wrong,VERSION)  # Self-consistent versions, metadata and embedded checksums.
+            with self.assertRaisesRegex(ValueError,'differs from the declared source'):
+                verify_source(wrong.read_bytes(),source,sha,VERSION)
+            verify_source(good,source,sha,VERSION)  # Later HEAD cannot change the pinned rebuild.
+            self.assertEqual((source/'payload.txt').read_text(),'uncommitted work must be ignored')
+
+    def test_source_proof_cli_and_missing_commit_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source,sha=self.fixture(root)
+            good=package_release.build(source,sha,VERSION,root/'good').read_bytes()
+            args=[sys.executable,str(ROOT/'scripts/verify_release_source.py'),
+                  '--source',str(source),'--source-sha',sha,'--version',VERSION]
+            completed=subprocess.run(args,input=good,capture_output=True)
+            self.assertEqual(completed.returncode,0,completed.stderr)
+            args[args.index(sha)]='f'*40
+            self.assertNotEqual(subprocess.run(args,input=good,capture_output=True).returncode,0)
 
     def test_invalid_inputs_stop_before_output(self):
         with tempfile.TemporaryDirectory() as directory:

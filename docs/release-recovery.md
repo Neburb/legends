@@ -307,3 +307,15 @@ PY
 
 Reconcile every orphan tag/duplicate source first. Mocked Node CI and actionlint
 never publish releases, certify native installation or authorize recovery writes.
+
+## Automated retry source proof
+
+A healthy retry requires exactly one complete `Source:` line, exactly the expected
+ZIP and `SHA256SUMS.txt` assets, valid archive checksums, and byte equality with a
+rebuild of the declared immutable private commit at the existing release version.
+The receiver uses its checked-out trusted public packaging recipe for this check.
+If an older recipe produced different bytes, the build fails, or the commit is
+unavailable, the receiver stops with the existing recovery URL; it does not
+allocate another version or declare the prior release healthy. Use the original
+workflow run's pinned recipe and guarded recovery steps above to investigate.
+A valid ZIP and matching checksums alone do not establish source provenance.

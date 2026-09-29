@@ -23,15 +23,24 @@ const zipData = makeZip();
 const sumsData = Buffer.from(`${crypto.createHash('sha256').update(zipData).digest('hex')}  ${zipName}\n`);
 const prior = {draft:false, tag_name:'v0.0.75', body:`Automated package\n\nSource: https://github.com/Neburb/gen1recomp-legends/commit/${sha}`,
   assets:[{id:1,name:'SHA256SUMS.txt',size:sumsData.length},{id:2,name:zipName,size:zipData.length}],html_url:'https://example.test/release/v0.0.75'};
-async function check({current=sha, releases=[], tags=[], allowed, rejects, assets={1:sumsData,2:zipData}, sourceSha=sha, sourceRef='refs/heads/main'}) {
+async function check({current=sha, releases=[], tags=[], allowed, rejects, assets={1:sumsData,2:zipData}, sourceSha=sha, sourceRef='refs/heads/main', trustedZip=zipData, rebuildFails=false}) {
   process.env.SOURCE_SHA=sourceSha; process.env.SOURCE_REF=sourceRef; process.env.PUBLIC_TOKEN='mock-public-read';
   let branchCalls=0, output;
   const github={rest:{repos:{listReleases:()=>{},listTags:()=>{},getBranch:async()=>{branchCalls++;return {data:{commit:{sha:current}}}},
     getReleaseAsset:async options=>{assert.equal(options.headers.authorization,'Bearer mock-public-read');assert.equal(options.headers.accept,'application/octet-stream');const bytes=assets[options.asset_id];return {data:bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)}}}},
     paginate:async(fn,options)=>{assert.equal(options.headers.authorization,'Bearer mock-public-read');return fn===github.rest.repos.listTags?tags:releases}};
   const core={info:()=>{},setOutput:(name,value)=>{assert.equal(name,'allowed');output=value}};
-  if(rejects) {await assert.rejects(run(github,core,require),rejects);assert.equal(output,undefined)}
-  else {await run(github,core,require);assert.equal(output,allowed)}
+  // Controlled source-build double; Python integration tests execute the real recipe.
+  const guardedRequire = name => name !== 'node:child_process' ? require(name) : {
+    execFileSync: (python, args, options) => {
+      if(args[0] === 'scripts/verify_release_archive.py') return execFileSync(python, args, options);
+      assert.deepEqual(args, ['scripts/verify_release_source.py', '--source', 'source', '--source-sha', sourceSha, '--version', '0.0.75']);
+      execFileSync(python, ['scripts/verify_release_archive.py', '-', '0.0.75'], options);
+      if(rebuildFails || !options.input.equals(trustedZip)) throw new Error('source rebuild mismatch');
+    },
+  };
+  if(rejects) {await assert.rejects(run(github,core,guardedRequire),rejects);assert.equal(output,undefined)}
+  else {await run(github,core,guardedRequire);assert.equal(output,allowed)}
   return branchCalls;
 }
 test('publication boundary handles freshness and rejects damaged retries',async t=>{
@@ -44,6 +53,11 @@ test('publication boundary handles freshness and rejects damaged retries',async 
     const sum=Buffer.from(`${crypto.createHash('sha256').update(data).digest('hex')}  ${zipName}\n`);
     return {releases:[{...prior,assets:prior.assets.map(a=>({...a,size:a.id===1?sum.length:data.length}))}],assets:{1:sum,2:data},rejects:recovery};
   };
+  await t.test('conflicting complete Source lines require recovery',()=>check({releases:[{...prior,body:prior.body+'\nSource: https://github.com/Neburb/gen1recomp-legends/commit/'+newer}],rejects:recovery}));
+  await t.test('duplicate identical Source lines require recovery',()=>check({releases:[{...prior,body:prior.body+'\nSource: https://github.com/Neburb/gen1recomp-legends/commit/'+sha}],rejects:recovery}));
+  await t.test('extra published asset requires recovery',()=>check({releases:[{...prior,assets:[...prior.assets,{id:3,name:'stale.zip',size:1}]}],rejects:recovery}));
+  await t.test('valid but wrong source package requires recovery',()=>check(archiveCheck(makeZip({extra:{'other-source.txt':'self-consistent foreign package'}}))));
+  await t.test('source rebuild failure cannot declare healthy',()=>check({releases:[prior],rebuildFails:true,rejects:recovery}));
   await t.test('orphan semver tag blocks a new version',()=>check({tags:[{name:'v0.0.75'}],rejects:/Release tag needs reconciliation: v0.0.75/}));
   await t.test('tag belonging to another source release permits current publication',()=>check({tags:[{name:'v0.0.75'}],releases:[{...prior,body:prior.body.replace(sha,newer)}],allowed:'true'}));
   await t.test('nonrelease tags do not block allocation',()=>check({tags:[{name:'backup-source'}],allowed:'true'}));
