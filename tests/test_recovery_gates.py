@@ -135,8 +135,27 @@ sys.argv=sys.argv[1:];exec(sys.stdin.read(),{'__name__':'__main__'})
                 result = self.bash('set -euo pipefail\nZIP=expected.zip\nSUMS=expected.sums\nVERIFIED_DIR=verified\nZIP_NAME=package.zip\n' + comparison, directory)
                 self.assertEqual(result.returncode == 0, success)
         self.assertIn('metadata "$RECOVERY_DIR/release-verified.json" "$TAG" "$SOURCE_SHA"', block)
-        final = BLOCKS[-1]
+        final = next(b for b in BLOCKS if 'gh release edit "$TAG" --draft=false' in b)
         self.assertLess(final.index(' quiescent'), final.index('--draft=false'))
+
+    def test_published_metadata_read_only_check(self):
+        block = next(b for b in BLOCKS if b.startswith('FINAL_DIR='))
+        check = re.search(r"python3 - .*? <<'PY'\n(.*?)\nPY", block, re.S)[1]
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'release.json'
+            for patch, success in [({'draft': False}, True),
+                                   ({'draft': True}, False),
+                                   ({'draft': False, 'tag_name': 'v0.0.76'}, False),
+                                   ({'draft': False, 'body': 'Source: wrong'}, False),
+                                   ({'draft': False, 'body': self.release()['body'] + '\n' + self.release()['body'].splitlines()[-1]}, False)]:
+                release = {**self.release(), **patch}
+                path.write_text(json.dumps(release))
+                result = subprocess.run([sys.executable, '-c', check, str(path), TAG, SHA],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+        self.assertIn('cmp "$ZIP" "$FINAL_DIR/$ZIP_NAME"', block)
+        self.assertIn('cmp "$SUMS" "$FINAL_DIR/SHA256SUMS.txt"', block)
+        self.assertFalse(any(word in block for word in ('release edit', 'release upload', 'release create', 'workflow enable', 'dispatch')))
 
     def test_same_version_self_consistent_wrong_package_stops(self):
         with tempfile.TemporaryDirectory() as directory:

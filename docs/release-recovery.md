@@ -7,7 +7,7 @@ source to bypass the guard.
 
 ## Prerequisites and inputs
 
-Use Bash on Linux/WSL with Git, authenticated gh, Python 3, tar, unzip and sha256sum.
+Use Bash on Linux/WSL with Git, authenticated gh, Python 3.12 or newer, unzip and sha256sum.
 You need private source access, and write access for manual publication. Start in
 a Neburb/legends checkout containing scripts/verify_release_archive.py.
 Read the failed run's dispatch payload and release notes. Record the existing tag,
@@ -30,13 +30,13 @@ read -r -p 'Original public workflow run ID: ' RUN_ID
 VERSION="${TAG#v}"
 RECOVERY_DIR="$(mktemp -d)"
 SOURCE_DIR="$RECOVERY_DIR/source"
-STAGING_DIR="$RECOVERY_DIR/package"
+RECIPE_DIR="$RECOVERY_DIR/recipe"
 DIST_DIR="$RECOVERY_DIR/dist"
 DOWNLOADED_DIR="$RECOVERY_DIR/downloaded"
 ZIP_NAME="stadium_realtime_combat-${VERSION}.zip"
 ZIP="$DIST_DIR/$ZIP_NAME"
 SUMS="$DIST_DIR/SHA256SUMS.txt"
-mkdir -p "$STAGING_DIR" "$DIST_DIR" "$DOWNLOADED_DIR"
+mkdir -p "$DIST_DIR" "$DOWNLOADED_DIR"
 gh api "repos/Neburb/legends/git/ref/tags/$TAG" > "$RECOVERY_DIR/tag-before.json"
 gh run view "$RUN_ID" --repo Neburb/legends --log > "$RECOVERY_DIR/original-run.log"
 python3 "$PUBLIC_DIR/scripts/inspect_recovery_release.py" "$TAG" > "$RECOVERY_DIR/release-before.json"
@@ -67,47 +67,42 @@ A zero-asset draft has an intentionally empty backup; no download is attempted.
 
 ## Rebuild the existing version, without allocating one
 
-After verifying the recorded source/tag mapping, run the workflow's same archive,
-stamp and package steps in an isolated directory:
+After verifying the recorded source/tag mapping, use the shared packaging script
+from the **public commit checked out by the original run**. Retain the run metadata
+and verify that its head SHA is the public recipe revision used in its checkout
+logs (the workflow checks out its event head). Stop if those records disagree.
+This pins both the script and archive validator; the private source SHA pins
+`tools/package.py`. Do not substitute today's public main during recovery.
+For older runs without this script, stop and obtain an explicitly approved legacy
+rebuild plan based on that run's recorded steps; do not invent equivalent bytes.
 
 ```bash
 gh repo clone Neburb/gen1recomp-legends "$SOURCE_DIR"
 git -C "$SOURCE_DIR" fetch origin "$SOURCE_SHA"
 git -C "$SOURCE_DIR" checkout --detach "$SOURCE_SHA"
 test "$(git -C "$SOURCE_DIR" rev-parse HEAD)" = "$SOURCE_SHA"
-git -C "$SOURCE_DIR" archive "$SOURCE_SHA" | tar -x -C "$STAGING_DIR"
-python3 - "$STAGING_DIR" "$VERSION" <<'PY'
-import json, pathlib, re, shutil, sys
-root = pathlib.Path(sys.argv[1]).resolve()
-version = sys.argv[2]
-for name in ('.github', '.git', '.gitattributes', '.gitignore', '.luarc.json'):
-    target = root / name
-    if target.is_symlink():
-        target.unlink()
-    elif target.is_dir():
-        shutil.rmtree(target)
-    elif target.exists():
-        target.unlink()
-manifest_path = root / 'manifest.json'
-manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-manifest['version'] = version
-manifest['github'] = 'Neburb/legends'
-manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-main_path = root / 'main.lua'
-source, count = re.subn(r'(mod\.exports\.version\s*=\s*")[^"]+(\")',
-                      rf'\g<1>{version}\g<2>', main_path.read_text(encoding='utf-8'), count=1)
-if count != 1:
-    raise SystemExit('main.lua mod version declaration not found')
-main_path.write_text(source, encoding='utf-8')
+gh api "repos/Neburb/legends/actions/runs/$RUN_ID" > "$RECOVERY_DIR/run.json"
+RECIPE_SHA="$(python3 - "$RECOVERY_DIR/run.json" <<'PY'
+import json, re, sys
+run = json.load(open(sys.argv[1]))
+assert run['path'] == '.github/workflows/publish.yml'
+sha = run['head_sha']
+assert re.fullmatch(r'[0-9a-f]{40}', sha)
+print(sha)
 PY
-(cd "$STAGING_DIR" && python3 tools/package.py --out "$DIST_DIR")
-test -s "$DIST_DIR/stadium_realtime_combat_${VERSION}.zip"
-mv "$DIST_DIR/stadium_realtime_combat_${VERSION}.zip" "$ZIP"
-(cd "$DIST_DIR" && sha256sum "$ZIP_NAME" > SHA256SUMS.txt)
+)"
+# Confirm RECIPE_SHA against the retained original checkout logs before continuing.
+git -C "$PUBLIC_DIR" fetch origin "$RECIPE_SHA"
+git -C "$PUBLIC_DIR" worktree add --detach "$RECIPE_DIR" "$RECIPE_SHA"
+test "$(git -C "$RECIPE_DIR" rev-parse HEAD)" = "$RECIPE_SHA"
+test -f "$RECIPE_DIR/scripts/package_release.py"
+python3 "$RECIPE_DIR/scripts/package_release.py" --source "$SOURCE_DIR" \
+  --source-sha "$SOURCE_SHA" --version "$VERSION" --out "$DIST_DIR"
+
 test -s "$ZIP" && test -s "$SUMS"
 (cd "$DIST_DIR" && sha256sum -c SHA256SUMS.txt)
 unzip -t "$ZIP"
-python3 "$PUBLIC_DIR/scripts/verify_release_archive.py" "$ZIP" "$VERSION"
+python3 "$RECIPE_DIR/scripts/verify_release_archive.py" "$ZIP" "$VERSION"
 ```
 
 The validator checks CRCs, regular safe member paths and package exclusions,
@@ -241,7 +236,7 @@ VERIFIED_DIR="$(mktemp -d "$RECOVERY_DIR/verified.XXXXXX")"
 gh release download "$TAG" --repo Neburb/legends --dir "$VERIFIED_DIR"
 (cd "$VERIFIED_DIR" && sha256sum -c SHA256SUMS.txt)
 unzip -t "$VERIFIED_DIR/$ZIP_NAME"
-python3 "$PUBLIC_DIR/scripts/verify_release_archive.py" "$VERIFIED_DIR/$ZIP_NAME" "$VERSION"
+python3 "$RECIPE_DIR/scripts/verify_release_archive.py" "$VERIFIED_DIR/$ZIP_NAME" "$VERSION"
 gh api "repos/Neburb/legends/git/ref/tags/$TAG" > "$RECOVERY_DIR/tag-after.json"
 cmp "$RECOVERY_DIR/tag-before.json" "$RECOVERY_DIR/tag-after.json"
 cmp "$ZIP" "$VERIFIED_DIR/$ZIP_NAME"
@@ -274,7 +269,41 @@ receiver (`gh workflow enable publish.yml --repo Neburb/legends`) and resume the
 private producer/manual dispatch sources and consumers. Reconcile dispatches lost
 while the receiver was disabled before declaring maintenance complete.
 
-An operator may then retry the original dispatch with its original SHA and
-refs/heads/main. The boundary validates the repaired assets and skips publication.
+An operator may retry the original dispatch only while its recorded source SHA
+is still private `main`, with the original SHA and `refs/heads/main`. The pre-build
+gate admits it, then the boundary validates repaired assets and skips publication.
+If private `main` has advanced, preflight skips all build/boundary steps: a retry
+is **not evidence** that the historical release was checked. Do not dispatch a
+superseded source as a validation substitute.
+
+For a superseded SHA use a read-only check after publication: download both assets
+to another fresh directory, rerun the checksum/archive checks, compare both files
+with the pinned-recipe rebuild, and compare the saved tag object. Reinspect the
+release and assert the same tag, exactly one recorded Source line and published
+visibility. Retain these results; this verifies assets/provenance without executing
+the receiver, allocating a version, changing a release or resuming dispatch.
+The metadata helper's `metadata` mode requires a hidden draft, so use the explicit
+published-state check below for this read-only path:
+
+```bash
+FINAL_DIR="$(mktemp -d "$RECOVERY_DIR/final.XXXXXX")"
+gh release download "$TAG" --repo Neburb/legends --dir "$FINAL_DIR"
+(cd "$FINAL_DIR" && sha256sum -c SHA256SUMS.txt)
+python3 "$RECIPE_DIR/scripts/verify_release_archive.py" "$FINAL_DIR/$ZIP_NAME" "$VERSION"
+cmp "$ZIP" "$FINAL_DIR/$ZIP_NAME"
+cmp "$SUMS" "$FINAL_DIR/SHA256SUMS.txt"
+gh api "repos/Neburb/legends/git/ref/tags/$TAG" > "$RECOVERY_DIR/tag-final.json"
+cmp "$RECOVERY_DIR/tag-before.json" "$RECOVERY_DIR/tag-final.json"
+python3 "$PUBLIC_DIR/scripts/inspect_recovery_release.py" "$TAG" > "$RECOVERY_DIR/release-final.json"
+python3 - "$RECOVERY_DIR/release-final.json" "$TAG" "$SOURCE_SHA" <<'PY'
+import json, sys
+release = json.load(open(sys.argv[1]))
+assert release['tag_name'] == sys.argv[2] and release['draft'] is False
+lines = release['body'].replace('\\n', '\n').splitlines()
+sources = [line for line in lines if line.startswith('Source:')]
+assert sources == ['Source: https://github.com/Neburb/gen1recomp-legends/commit/' + sys.argv[3]]
+PY
+```
+
 Reconcile every orphan tag/duplicate source first. Mocked Node CI and actionlint
 never publish releases, certify native installation or authorize recovery writes.

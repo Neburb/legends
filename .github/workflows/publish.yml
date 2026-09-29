@@ -106,37 +106,8 @@ jobs:
           SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
         run: |
           set -euo pipefail
-          staging="$RUNNER_TEMP/legends-package"
-          mkdir -p "$staging" dist
-          git -C source archive "$SOURCE_SHA" | tar -x -C "$staging"
-          rm -rf "$staging/.github" "$staging/.git" "$staging/.gitattributes" \
-            "$staging/.gitignore" "$staging/.luarc.json"
-          python3 - "$staging/manifest.json" "$staging/main.lua" "$VERSION" <<'PY'
-          import json
-          import re
-          import sys
-          manifest_path, main_path, version = sys.argv[1:]
-          with open(manifest_path, encoding="utf-8") as fh:
-              manifest = json.load(fh)
-          manifest["version"] = version
-          manifest["github"] = "Neburb/legends"
-          with open(manifest_path, "w", encoding="utf-8") as fh:
-              json.dump(manifest, fh, indent=2, ensure_ascii=False)
-              fh.write("\n")
-          source = open(main_path, encoding="utf-8").read()
-          stamped, count = re.subn(
-              r'(mod\.exports\.version\s*=\s*")[^"]+(\")',
-              rf'\g<1>{version}\g<2>', source, count=1)
-          if count != 1:
-              raise SystemExit("main.lua mod version declaration not found")
-          open(main_path, "w", encoding="utf-8").write(stamped)
-          PY
-          (cd "$staging" && python3 tools/package.py --out "$GITHUB_WORKSPACE/dist")
-          generated="dist/stadium_realtime_combat_${VERSION}.zip"
-          test -s "$generated"
-          mv "$generated" "dist/stadium_realtime_combat-${VERSION}.zip"
-          python3 scripts/verify_release_archive.py "dist/stadium_realtime_combat-${VERSION}.zip" "$VERSION"
-          (cd dist && sha256sum "stadium_realtime_combat-${VERSION}.zip" > SHA256SUMS.txt)
+          python3 scripts/package_release.py --source source \
+            --source-sha "$SOURCE_SHA" --version "$VERSION" --out dist
 
       - name: Check freshness and duplicate source at publication boundary
         if: steps.source.outputs.allowed == 'true'

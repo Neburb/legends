@@ -85,7 +85,7 @@ const runPreflight = new (Object.getPrototypeOf(async function() {}).constructor
 test('private source cannot reach package execution before provenance succeeds',async t=>{
   const names=['Check out private source commit','Determine public release version','Build installable public ZIP','Check freshness and duplicate source at publication boundary'];
   for(const name of names) assert(workflow.includes(`      - name: ${name}\n        if: steps.source.outputs.allowed == 'true'`));
-  assert(workflow.indexOf('id: source')<workflow.indexOf('git -C source archive'));
+  assert(workflow.indexOf('python3 scripts/package_release.py')>workflow.indexOf('id: source'));
   const checkout=workflow.slice(workflow.indexOf('      - name: Check out public'),workflow.indexOf('      - name: Validate dispatch'));
   assert.match(checkout,/persist-credentials: false/);
   assert.match(workflow,/test "\$SOURCE_REF" = "refs\/heads\/main"/);

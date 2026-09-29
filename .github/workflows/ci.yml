@@ -22,6 +22,7 @@ jobs:
         run: |
           python3 tests/test_recovery_state.py
           python3 tests/test_recovery_gates.py
+          python3 tests/test_package_release.py
       - name: Validate workflow syntax
         env:
           ACTIONLINT_VERSION: '1.7.7'
