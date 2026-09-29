@@ -100,7 +100,8 @@ test('publication boundary handles freshness and rejects damaged retries',async 
   await t.test('truncated ZIP requires recovery',()=>check({releases:[prior],assets:{1:sumsData,2:zipData.subarray(1)},rejects:recovery}));
   await t.test('duplicate ZIP asset requires recovery',()=>check({releases:[{...prior,assets:[...prior.assets,prior.assets[1]]}],rejects:recovery}));
   await t.test('malformed checksum requires recovery',()=>check({releases:[{...prior,assets:prior.assets.map(a=>a.id===1?{...a,size:4}:a)}],assets:{1:Buffer.from('bad\n'),2:zipData},rejects:recovery}));
-  await t.test('different source draft does not block new source',()=>check({releases:[{...prior,draft:true,body:prior.body.replace(sha,newer)}],allowed:'true'}));
+  await t.test('source A draft blocks source B dispatch',()=>check({releases:[{...prior,draft:true,body:prior.body.replace(sha,newer)}],rejects:recovery}));
+  await t.test('draft without Source blocks allocation',()=>check({releases:[{...prior,draft:true,body:''}],rejects:recovery}));
   await t.test('invalid source ref fails',()=>check({sourceRef:'refs/heads/other',rejects:/Invalid source ref/}));
   await t.test('invalid SHA fails',()=>check({sourceSha:'bad',rejects:/Invalid source SHA/}));
 });

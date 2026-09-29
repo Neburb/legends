@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import io
+import signal
 
 from verify_release_archive import verify, read_bounded, MAX_ARCHIVE
 
@@ -21,7 +22,7 @@ IMAGE = 'legends-release-builder'
 
 def container_command(source, source_sha, version, name):
     recipe = Path(__file__).resolve().parent
-    return ['docker', 'run', '--name', name, '--network=none', '--read-only',
+    return ['docker', 'run', '--rm', '--name', name, '--network=none', '--read-only',
             '--user=65534:65534', '--cap-drop=ALL', '--security-opt=no-new-privileges',
             '--pids-limit=64', '--memory=1g', '--cpus=2',
             '--tmpfs=/tmp:rw,nosuid,noexec,size=768m',
@@ -62,8 +63,12 @@ def isolated_build(source, source_sha, version, out, downloaded=None):
         timer.cancel()
         # A killed CLI does not stop its container; drain it on every exit path.
         try:
-            subprocess.run(['docker', 'rm', '--force', name], env=environment,
-                           check=True, timeout=30, stdout=subprocess.DEVNULL)
+            drain = subprocess.run(['docker', 'rm', '--force', name], env=environment,
+                                   timeout=30, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.PIPE, text=True)
+            # --rm may already have removed a normally exited container.
+            if drain.returncode and 'No such container:' not in drain.stderr:
+                raise subprocess.CalledProcessError(drain.returncode, drain.args)
         finally:
             if process.poll() is None:
                 process.kill()
@@ -80,7 +85,12 @@ def isolated_build(source, source_sha, version, out, downloaded=None):
             f'{hashlib.sha256(data).hexdigest()}  {name}\n', encoding='utf-8', newline='\n')
 
 
+def cancel(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 if __name__ == '__main__':
+    signal.signal(signal.SIGTERM, cancel)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', required=True, type=Path)
     parser.add_argument('--source-sha', required=True)

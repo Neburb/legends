@@ -332,7 +332,10 @@ host process access or the runner workspace. Only read-only source and trusted
 recipe directories are mounted. `/out` is a 256 MiB tmpfs and `/tmp` a 768 MiB
 tmpfs; no writable host directory is mounted. Docker logging is disabled and the
 host reads at most 128 MiB plus one byte of ZIP output. A 1 GiB memory
-limit, 64-process limit and 300-second timeout bound execution; the host forcibly
+limit, 64-process limit and 300-second host timeout bound execution. A separate
+300-second watchdog in the trusted container PID 1 destroys all descendants even
+if the host wrapper is killed; Docker auto-removes the exited container. SIGTERM
+invokes host cleanup immediately; the host forcibly
 removes the named container after success or failure before a publication step
 can proceed. Host-side validation checks the output after container exit.
 

@@ -2,10 +2,24 @@
 import argparse
 from pathlib import Path
 import sys
+import os
+import threading
 from package_release import build
 from verify_release_archive import read_bounded, MAX_ARCHIVE
 
+# Runs as namespace PID 1: exiting destroys every source-owned descendant,
+# even when the authenticated host wrapper or Docker CLI has been SIGKILLed.
+LIFETIME_SECONDS = 300
+
+
+def expire():
+    os._exit(124)
+
+
 if __name__ == '__main__':
+    watchdog = threading.Timer(LIFETIME_SECONDS, expire)
+    watchdog.daemon = True
+    watchdog.start()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', required=True, type=Path)
     parser.add_argument('--source-sha', required=True)

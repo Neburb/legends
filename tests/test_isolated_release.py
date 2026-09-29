@@ -9,6 +9,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
+import signal
+import shutil
+import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import isolated_release as isolated
 import test_package_release as packaging
@@ -34,7 +37,7 @@ class HostGates(unittest.TestCase):
                 if timeout:self.callback()
             def cancel(self):pass
             def join(self):pass
-        with patch.object(isolated.subprocess,'Popen',side_effect=popen),patch.object(isolated.subprocess,'run') as drain,patch.object(isolated.threading,'Timer',Timer):
+        with patch.object(isolated.subprocess,'Popen',side_effect=popen),patch.object(isolated.subprocess,'run',return_value=subprocess.CompletedProcess([],0,stderr='')) as drain,patch.object(isolated.threading,'Timer',Timer):
             try:isolated.isolated_build('.', 'a'*40,VERSION,out,downloaded)
             finally:
                 args,options=captured[0];self.assertEqual(drain.call_args.args[0],['docker','rm','--force',args[args.index('--name')+1]])
@@ -45,7 +48,7 @@ class HostGates(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory,patch.dict(os.environ,{'PUBLIC_TOKEN':'parent-secret','INPUT_GITHUB_TOKEN':'private-secret'}):
             args,options=self.execute(fixture(),Path(directory)/'published',fixture())
             self.assertFalse((Path(directory)/'published').exists())
-        for flag in ('--network=none','--read-only','--user=65534:65534','--cap-drop=ALL','--security-opt=no-new-privileges','--pids-limit=64','--memory=1g','--tmpfs=/out:rw,nosuid,noexec,size=256m,mode=1777','--log-driver=none'):
+        for flag in ('--rm','--network=none','--read-only','--user=65534:65534','--cap-drop=ALL','--security-opt=no-new-privileges','--pids-limit=64','--memory=1g','--tmpfs=/out:rw,nosuid,noexec,size=256m,mode=1777','--log-driver=none'):
             self.assertIn(flag,args)
         self.assertNotIn('--pid=host',args);self.assertNotIn('--privileged',args)
         self.assertEqual(sum(a=='--mount' for a in args),2)
@@ -56,6 +59,12 @@ class HostGates(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(subprocess.TimeoutExpired):self.execute(fixture(),Path(directory)/'dist',timeout=True)
             self.assertFalse((Path(directory)/'dist').exists())
+
+    def test_container_watchdog_exits_when_source_blocks(self):
+        entry=Path(isolated.__file__).with_name('container_release.py')
+        script="import sys,time,runpy;sys.path.insert(0,"+repr(str(entry.parent))+ ");import package_release;package_release.build=lambda *a:time.sleep(30);sys.argv=['container_release.py','--source','.','--source-sha','"+'a'*40+"','--version','"+VERSION+"','--out','.'];exec(compile("+repr(entry.read_text().replace('LIFETIME_SECONDS = 300','LIFETIME_SECONDS = 1'))+",'container_release.py','exec'),{'__name__':'__main__'})"
+        result=subprocess.run([sys.executable,'-c',script],capture_output=True,timeout=10)
+        self.assertEqual(result.returncode,124,result.stderr)
 
     def test_bad_download_never_executes_source(self):
         with patch.object(isolated.subprocess,'Popen',side_effect=AssertionError('source executed')):
@@ -87,6 +96,42 @@ class HostGates(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('RUN_CONTAINER_TESTS')=='1','Docker integration runs in Linux CI')
 class ContainerIntegration(packaging.Packaging):
     # Inherited recipe tests are also executed in the Linux runtime.
+    def interrupted_wrapper(self, termination):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source,sha=self.fixture(root)
+            (source/'tools/package.py').write_text('import time\nwhile True: time.sleep(1)\n')
+            self.git(source,'add','tools/package.py')
+            self.git(source,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','blocking packager')
+            sha=self.git(source,'rev-parse','HEAD')
+            recipe=root/'recipe';shutil.copytree(Path(isolated.__file__).parent,recipe,ignore=shutil.ignore_patterns('__pycache__'))
+            entry=recipe/'container_release.py';entry.write_text(entry.read_text().replace('LIFETIME_SECONDS = 300','LIFETIME_SECONDS = 6'))
+            process=subprocess.Popen([sys.executable,str(recipe/'isolated_release.py'),'--source',str(source),'--source-sha',sha,'--version',VERSION,'--out',str(root/'dist')],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            name=None
+            try:
+                deadline=time.monotonic()+30
+                while time.monotonic()<deadline:
+                    names=subprocess.check_output(['docker','ps','--filter','name=legends-package-','--format','{{.Names}}'],text=True).splitlines()
+                    if names:name=names[0];break
+                    self.assertIsNone(process.poll(),'wrapper exited before signal');time.sleep(.1)
+                self.assertIsNotNone(name,'container did not start')
+                os.kill(process.pid,termination);process.wait(timeout=15)
+                deadline=time.monotonic()+12
+                while time.monotonic()<deadline:
+                    names=subprocess.check_output(['docker','ps','-a','--filter','name='+name,'--format','{{.Names}}'],text=True).splitlines()
+                    if name not in names:break
+                    time.sleep(.1)
+                self.assertNotIn(name,names,'container survived wrapper cancellation')
+                self.assertFalse((root/'dist').exists())
+            finally:
+                if process.poll() is None:process.kill();process.wait()
+                if name:subprocess.run(['docker','rm','--force',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+
+    def test_sigterm_drains_real_container(self):
+        self.interrupted_wrapper(signal.SIGTERM)
+
+    def test_sigkill_independent_container_lifetime(self):
+        self.interrupted_wrapper(signal.SIGKILL)
+
     def test_real_container_blocks_parent_credentials_workspace_and_network(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);source,sha=self.fixture(root)

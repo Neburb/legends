@@ -137,8 +137,8 @@ jobs:
             const matches = releases.filter(r => sourceLines(r).includes(`Source: ${sourceUrl}`));
             const repair = r => new Error(`Source release needs recovery: ${r.html_url}; follow docs/release-recovery.md using this exact source SHA and existing tag.`);
             // A failed upload can leave a draft/tag. Never allocate another version for it.
-            const draft = matches.find(r => r.draft);
-            if (draft) throw repair(draft);
+            const draft = releases.find(r => r.draft);
+            if (draft) throw new Error(`Source release needs recovery: ${draft.html_url}; follow docs/release-recovery.md using the draft's declared source SHA and existing tag before dispatching another source.`);
             if (matches.length > 1) throw repair(matches[0]);
             const prior = matches[0];
             if (prior) {
