@@ -25,6 +25,7 @@ jobs:
           python3 tests/test_package_release.py
           python3 tests/test_archive_limits.py
           python3 tests/test_isolated_release.py
+          python3 tests/test_manual_version.py
       - name: Exercise source isolation in real containers
         run: |
           docker build -t legends-release-builder -f scripts/release-container.Dockerfile scripts

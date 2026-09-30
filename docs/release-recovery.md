@@ -2,7 +2,7 @@
 
 The receiver stops on drafts, duplicate sources, damaged archives and semver tags
 without releases. Recovery requires operator approval. Preserve the existing tag,
-private source SHA and version; do not invoke the allocator or dispatch a different
+private source SHA and version; do not assign a new version or dispatch a different
 source to bypass the guard.
 
 ## Prerequisites and inputs
