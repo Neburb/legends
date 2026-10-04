@@ -32,7 +32,7 @@ def build(source, source_sha, version, out):
     with tempfile.TemporaryDirectory(prefix='legends-package-') as directory:
         staging = Path(directory) / 'source'
         staging.mkdir()
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        with io.BytesIO(archive) as source_archive, tarfile.open(fileobj=source_archive) as tar:
             tar.extractall(staging, filter='data')
         del archive  # Release the source buffer before the source-owned packager runs.
         for name in ('.github', '.git', '.gitattributes', '.gitignore', '.luarc.json'):
