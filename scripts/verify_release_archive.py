@@ -32,6 +32,13 @@ def read_bounded(stream, limit):
 BLOCKED_SUFFIXES = {'.z64', '.n64', '.v64', '.rom', '.gb', '.gbc', '.exe', '.dll', '.so', '.ttf', '.otf', '.ttc', '.woff', '.woff2', '.eot', '.fon', '.zip', '.love', '.pyc', '.rtcbin', '.sav', '.srm', '.state', '.gba', '.bin', '.pack'}
 
 
+PAINTER_FONT_MEMBERS = {
+    'assets/painter/RobotoCondensed.ttf',
+    'assets/painter/RobotoCondensed-Italic.ttf',
+    'assets/painter/Caveat.ttf',
+}
+
+
 def safe_member(member):
     name = member.filename
     parts = name.split('/')
@@ -40,7 +47,8 @@ def safe_member(member):
             or any(p in ('', '.', '..') or p.lower() in BLOCKED_PARTS or p.lower() in SENSITIVE_PARTS or p.lower().startswith('.env') for p in parts)
             or member.is_dir() or stat.S_IFMT(mode) not in (0, stat.S_IFREG)
             or '.tmp.' in parts[-1] or pathlib.PurePosixPath(name).suffix.lower() in {'.pem', '.key', '.p12', '.pfx'}
-            or pathlib.PurePosixPath(name).suffix.lower() in BLOCKED_SUFFIXES
+            or (pathlib.PurePosixPath(name).suffix.lower() in BLOCKED_SUFFIXES
+                and name not in PAINTER_FONT_MEMBERS)
             or name.startswith('reports/animation_lab/')):
         raise ValueError('unsafe or excluded ZIP member: ' + repr(name))
 

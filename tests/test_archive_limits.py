@@ -30,6 +30,15 @@ class Limits(unittest.TestCase):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError,'unsafe'):
                 v.verify(io.BytesIO(fixture({name:b'secret'})), '0.0.75')
 
+    def test_only_approved_painter_fonts_are_allowed(self):
+        for name in v.PAINTER_FONT_MEMBERS:
+            with self.subTest(name=name):
+                v.verify(io.BytesIO(fixture({name:b'licensed font fixture'})), '0.0.75')
+        for name in ('assets/painter/Other.ttf', 'fonts/RobotoCondensed.ttf',
+                     'assets/painter/nested/Caveat.ttf', 'assets/painter/Caveat.exe'):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'unsafe'):
+                v.verify(io.BytesIO(fixture({name:b'excluded'})), '0.0.75')
+
     def test_valid_content_hashes_are_streamed_and_crc_checked(self):
         data=fixture({'payload.txt':b'abcd'*30000})
         with patch.object(zipfile.ZipFile,'read',side_effect=AssertionError('unbounded read')):

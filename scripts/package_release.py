@@ -34,6 +34,7 @@ def build(source, source_sha, version, out):
         staging.mkdir()
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
             tar.extractall(staging, filter='data')
+        del archive  # Release the source buffer before the source-owned packager runs.
         for name in ('.github', '.git', '.gitattributes', '.gitignore', '.luarc.json'):
             target = staging / name
             if target.is_symlink() or target.is_file():
