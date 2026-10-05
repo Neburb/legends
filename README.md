@@ -12,5 +12,10 @@ in `client_payload`, alongside `source_repo`, the full `source_sha` and
 This opt-in requires the snapshot to be an ancestor of current main and its latest
 push CI run on main for that exact SHA to have completed successfully. Both checks
 run before executing source and again before publication. The source token needs
-read access to private repository contents and Actions. Version, duplicate release,
+read access to private repository contents. Actions read access enables live CI
+checks. For a contents-only token, an operator can instead record the exact-source
+successful CI run in trusted `scripts/approved_source.json` with an expiration,
+after independently verifying it through authenticated GitHub access. A 403 may
+use only that recorded SHA before expiration; dispatch payloads cannot supply an
+approval, and other API failures stop publication. Version, duplicate release,
 archive validation and isolated build requirements still apply.

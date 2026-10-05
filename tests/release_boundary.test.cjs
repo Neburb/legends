@@ -143,6 +143,28 @@ test('pinned preflight requires ancestry and the latest exact main CI', async t 
   await t.test('newer failed rerun wins over prior success', () => assert.rejects(pinned({runs: [good, {...good, id: 11, conclusion: 'failure'}]}), /successful latest main CI/));
   await t.test('API failure cannot build', () => assert.rejects(pinned({apiError: true}), /API failure/));
 });
+test('contents-only token can use only an unexpired trusted exact-source approval', async t => {
+  const {sourceAllowed} = require('../scripts/source_provenance.cjs');
+  const approved = {id: 42, head_sha: sha, head_branch: 'main', event: 'push',
+    path: '.github/workflows/ci.yml', status: 'completed', conclusion: 'success',
+    html_url: 'https://github.com/Neburb/gen1recomp-legends/actions/runs/42',
+    verified_at: new Date().toISOString(), expires_at: new Date(Date.now() + 60000).toISOString()};
+  async function invoke(approval = approved, errorStatus = 403) {
+    return sourceAllowed({rest: {repos: {
+      getBranch: async () => ({data: {commit: {sha: newer}}}),
+      compareCommits: async () => ({data: {status: 'ahead', merge_base_commit: {sha}}}),
+    }, actions: {listWorkflowRuns: () => {}}}, paginate: async () => {
+      throw Object.assign(new Error('API access denied'), {status: errorStatus});
+    }}, {info: () => {}}, sha, true, approval);
+  }
+  await t.test('exact source approval permits publication', async () => assert.equal(await invoke(), true));
+  for (const [field, value] of Object.entries({head_sha: newer, expires_at: '2000-01-01', html_url: 'https://example.test/fake'})) {
+    await t.test(`invalid approval ${field} cannot publish`, () => assert.rejects(invoke({...approved, [field]: value}), /API access denied/));
+  }
+  await t.test('missing approval cannot publish', () => assert.rejects(invoke(null), /API access denied/));
+  await t.test('recorded failed CI cannot publish', () => assert.rejects(invoke({...approved, conclusion: 'failure'}), /successful latest main CI/));
+  await t.test('other API failures cannot use approval', () => assert.rejects(invoke(approved, 500), /API access denied/));
+});
 test('private source cannot reach package execution before provenance succeeds',async t=>{
   const names=['Check out private source commit','Determine public release version','Build installable public ZIP','Check freshness and duplicate source at publication boundary'];
   for(const name of names) assert(workflow.includes(`      - name: ${name}\n        if: steps.source.outputs.allowed == 'true'`));
