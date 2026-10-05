@@ -23,15 +23,15 @@ const zipData = makeZip();
 const sumsData = Buffer.from(`${crypto.createHash('sha256').update(zipData).digest('hex')}  ${zipName}\n`);
 const prior = {draft:false, tag_name:'v0.0.75', body:`Automated package\n\nSource: https://github.com/Neburb/gen1recomp-legends/commit/${sha}`,
   assets:[{id:1,name:'SHA256SUMS.txt',size:sumsData.length},{id:2,name:zipName,size:zipData.length}],html_url:'https://example.test/release/v0.0.75'};
-async function check({current=sha, releases=[], tags=[], allowed, rejects, assets={1:sumsData,2:zipData}, sourceSha=sha, sourceRef='refs/heads/main', trustedZip=zipData, rebuildFails=false}) {
-  process.env.SOURCE_SHA=sourceSha; process.env.SOURCE_REF=sourceRef; process.env.PUBLIC_TOKEN='mock-public-read';
+async function check({current=sha, releases=[], tags=[], allowed, rejects, assets={1:sumsData,2:zipData}, sourceSha=sha, sourceRef='refs/heads/main', trustedZip=zipData, rebuildFails=false, pinned=false, compareStatus='ahead', mergeBase=sha, ciStatus='completed', ciConclusion='success'}) {
+  process.env.SOURCE_SHA=sourceSha; process.env.SOURCE_REF=sourceRef; process.env.PUBLIC_TOKEN='mock-public-read'; process.env.ALLOW_MAIN_ANCESTOR=String(pinned);
   let branchCalls=0, output;
-  const github={rest:{repos:{listReleases:()=>{},listTags:()=>{},getBranch:async()=>{branchCalls++;return {data:{commit:{sha:current}}}},
-    getReleaseAsset:async options=>{assert.equal(options.headers.authorization,'Bearer mock-public-read');assert.equal(options.headers.accept,'application/octet-stream');const bytes=assets[options.asset_id];return {data:bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)}}}},
-    paginate:async(fn,options)=>{assert.equal(options.headers.authorization,'Bearer mock-public-read');return fn===github.rest.repos.listTags?tags:releases}};
+  const github={rest:{repos:{listReleases:()=>{},listTags:()=>{},compareCommits:async()=>({data:{status:compareStatus,merge_base_commit:{sha:mergeBase}}}),getBranch:async()=>{branchCalls++;return {data:{commit:{sha:current}}}},
+    getReleaseAsset:async options=>{assert.equal(options.headers.authorization,'Bearer mock-public-read');assert.equal(options.headers.accept,'application/octet-stream');const bytes=assets[options.asset_id];return {data:bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)}}},actions:{listWorkflowRuns:()=>{}}},
+    paginate:async(fn,options)=>{if(fn===github.rest.actions.listWorkflowRuns) return [{id:1,head_sha:sourceSha,head_branch:'main',event:'push',path:'.github/workflows/ci.yml',status:ciStatus,conclusion:ciConclusion}];assert.equal(options.headers.authorization,'Bearer mock-public-read');return fn===github.rest.repos.listTags?tags:releases}};
   const core={info:()=>{},setOutput:(name,value)=>{assert.equal(name,'allowed');output=value}};
   // Controlled source-build double; Python integration tests execute the real recipe.
-  const guardedRequire = name => name !== 'node:child_process' ? require(name) : {
+  const guardedRequire = name => name === './scripts/source_provenance.cjs' ? require('../scripts/source_provenance.cjs') : name !== 'node:child_process' ? require(name) : {
     execFileSync: (python, args, options) => {
       if(args[0] === 'scripts/verify_release_archive.py') return execFileSync(python, args, options);
       assert.deepEqual(Object.keys(options.env).sort(), ['PATH', 'SystemRoot', 'TEMP', 'TMP'].filter(key=>typeof process.env[key]==='string').sort());
@@ -48,6 +48,10 @@ async function check({current=sha, releases=[], tags=[], allowed, rejects, asset
 test('publication boundary handles freshness and rejects damaged retries',async t=>{
   await t.test('new current source is allowed',()=>check({allowed:'true'}));
   await t.test('superseded source is skipped',()=>check({current:newer,allowed:'false'}));
+  await t.test('explicitly pinned validated ancestor publishes',()=>check({current:newer,pinned:true,allowed:'true'}));
+  await t.test('pinned diverged source cannot publish',()=>check({current:newer,pinned:true,compareStatus:'diverged',rejects:/not an ancestor/}));
+  await t.test('pinned failed CI cannot publish',()=>check({current:newer,pinned:true,ciConclusion:'failure',rejects:/successful latest main CI/}));
+  await t.test('pinned pending CI cannot publish',()=>check({current:newer,pinned:true,ciStatus:'in_progress',rejects:/successful latest main CI/}));
   await t.test('complete retry verifies bytes and avoids branch lookup',async()=>assert.equal(await check({releases:[prior],allowed:'false'}),0));
   await t.test('legacy literal newline notes are recognized',()=>check({releases:[{...prior,body:prior.body.replaceAll('\n','\\n')}],allowed:'false'}));
   const recovery = /Source release needs recovery: https:\/\/example.test\/release\/v0.0.75; follow docs\/release-recovery.md/;
@@ -106,7 +110,39 @@ test('publication boundary handles freshness and rejects damaged retries',async 
   await t.test('invalid SHA fails',()=>check({sourceSha:'bad',rejects:/Invalid source SHA/}));
 });
 const preflight = workflow.match(/        id: source[\s\S]*?          script: \|\n([\s\S]*?)\n      - name: Prepare trusted isolated packaging runtime/)[1].split('\n').map(line=>line.slice(12)).join('\n');
-const runPreflight = new (Object.getPrototypeOf(async function() {}).constructor)('github','core',preflight);
+const runPreflight = new (Object.getPrototypeOf(async function() {}).constructor)('github','core','require',preflight);
+test('pinned preflight requires ancestry and the latest exact main CI', async t => {
+  const good = {id: 10, head_sha: sha, head_branch: 'main', event: 'push',
+    path: '.github/workflows/ci.yml', status: 'completed', conclusion: 'success'};
+  async function pinned({runs = [good], status = 'ahead', base = sha, apiError = false} = {}) {
+    process.env.SOURCE_SHA = sha; process.env.ALLOW_MAIN_ANCESTOR = 'true';
+    let output;
+    const github = {rest: {repos: {
+      getBranch: async () => ({data: {commit: {sha: newer}}}),
+      compareCommits: async options => {
+        assert.equal(options.base, sha); assert.equal(options.head, newer);
+        return {data: {status, merge_base_commit: {sha: base}}};
+      },
+    }, actions: {listWorkflowRuns: () => {}}}, paginate: async (fn, options) => {
+      assert.equal(fn, github.rest.actions.listWorkflowRuns);
+      assert.equal(options.head_sha, sha); assert.equal(options.workflow_id, 'ci.yml');
+      if (apiError) throw new Error('API failure');
+      return runs;
+    }};
+    await runPreflight(github, {info: () => {}, setOutput: (n, v) => {output = v}},
+      () => require('../scripts/source_provenance.cjs'));
+    return output;
+  }
+  await t.test('approved ancestor can build', async () => assert.equal(await pinned(), 'true'));
+  await t.test('unrelated merge base cannot build', () => assert.rejects(pinned({base: newer}), /not an ancestor/));
+  await t.test('source ahead of main cannot build', () => assert.rejects(pinned({status: 'behind'}), /not an ancestor/));
+  await t.test('missing CI cannot build', () => assert.rejects(pinned({runs: []}), /successful latest main CI/));
+  for (const [field, value] of Object.entries({head_sha: newer, head_branch: 'other', event: 'pull_request', path: 'other.yml', status: 'in_progress', conclusion: 'failure'})) {
+    await t.test(`wrong CI ${field} cannot build`, () => assert.rejects(pinned({runs: [{...good, [field]: value}]}), /successful latest main CI/));
+  }
+  await t.test('newer failed rerun wins over prior success', () => assert.rejects(pinned({runs: [good, {...good, id: 11, conclusion: 'failure'}]}), /successful latest main CI/));
+  await t.test('API failure cannot build', () => assert.rejects(pinned({apiError: true}), /API failure/));
+});
 test('private source cannot reach package execution before provenance succeeds',async t=>{
   const names=['Check out private source commit','Determine public release version','Build installable public ZIP','Check freshness and duplicate source at publication boundary'];
   for(const name of names) assert(workflow.includes(`      - name: ${name}\n        if: steps.source.outputs.allowed == 'true'`));
@@ -115,11 +151,11 @@ test('private source cannot reach package execution before provenance succeeds',
   assert.match(checkout,/persist-credentials: false/);
   assert.match(workflow,/test "\$SOURCE_REF" = "refs\/heads\/main"/);
   const checkPreflight=async(current,error)=>{
-    process.env.SOURCE_SHA=sha;let output,executed=false;
+    process.env.SOURCE_SHA=sha;process.env.ALLOW_MAIN_ANCESTOR='false';let output,executed=false;
     const github={rest:{repos:{getBranch:async()=>{if(error) throw error;return {data:{commit:{sha:current}}}}}}};
     const core={info:()=>{},setOutput:(n,v)=>{assert.equal(n,'allowed');output=v}};
-    if(error) await assert.rejects(runPreflight(github,core),/API failure/);
-    else await runPreflight(github,core);
+    if(error) await assert.rejects(runPreflight(github,core,name=>require('../scripts/source_provenance.cjs')),/API failure/);
+    else await runPreflight(github,core,name=>require('../scripts/source_provenance.cjs'));
     if(output==='true') executed=true;
     return executed;
   };

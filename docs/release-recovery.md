@@ -272,12 +272,18 @@ receiver (`gh workflow enable publish.yml --repo Neburb/legends`) and resume the
 private producer/manual dispatch sources and consumers. Reconcile dispatches lost
 while the receiver was disabled before declaring maintenance complete.
 
-An operator may retry the original dispatch only while its recorded source SHA
+By default an operator may retry the original dispatch only while its recorded source SHA
 is still private `main`, with the original SHA and `refs/heads/main`. The pre-build
 gate admits it, then the boundary validates repaired assets and skips publication.
 If private `main` has advanced, preflight skips all build/boundary steps: a retry
 is **not evidence** that the historical release was checked. Do not dispatch a
 superseded source as a validation substitute.
+
+For a new, explicitly approved snapshot release while main advances, the opt-in
+`allow_main_ancestor: true` payload described in README.md requires ancestry and
+successful exact-source main CI at both gates. It does not authorize recovery or
+bypass any draft, orphan tag, duplicate source, version or archive guard. The
+read-only verification below remains appropriate for historical releases.
 
 For a superseded SHA use a read-only check after publication: download both assets
 to another fresh directory, rerun the checksum/archive checks, compare both files
