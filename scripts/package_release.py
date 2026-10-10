@@ -5,7 +5,6 @@ public checkout recorded by the original workflow run, not today's main.
 """
 import argparse
 import hashlib
-import io
 import json
 from pathlib import Path
 import re
@@ -14,8 +13,96 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import zipfile
 
 from verify_release_archive import verify
+
+
+PACKAGER_SUPPORT = {'tools/package.py', 'tools/check_engine_compatibility.py'}
+ALWAYS_EXCLUDED = {'.github', '.git', '.gitattributes', '.gitignore', '.luarc.json', '.modkitignore'}
+CHUNK = 64 * 1024
+
+
+def modkitignore_rules(source, source_sha):
+    try:
+        text = subprocess.check_output(
+            ['git', '-C', str(source), 'show', f'{source_sha}:.modkitignore'],
+            text=True, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        return set()
+    rules = set()
+    for raw in text.splitlines():
+        rule = raw.strip().rstrip('/')
+        if not rule or rule.startswith('#'):
+            continue
+        if (rule.startswith('/') or '\\' in rule or ':' in rule
+                or any(part in ('', '.', '..') for part in rule.split('/'))
+                or any(char in rule for char in '*?[]')):
+            raise ValueError(f'unsupported .modkitignore entry: {raw!r}')
+        rules.add(rule)
+    return rules
+
+
+def ignored_path(name, rules):
+    name = name.rstrip('/')
+    return any(name == rule or name.startswith(rule + '/') for rule in rules | ALWAYS_EXCLUDED)
+
+
+def extract_installable_source(source, source_sha, staging, rules):
+    """Stream the immutable Git archive and omit modkit-excluded development trees."""
+    process = subprocess.Popen(
+        ['git', '-C', str(source), 'archive', source_sha],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        with tarfile.open(fileobj=process.stdout, mode='r|') as archive:
+            while member := archive.next():
+                name = member.name.rstrip('/')
+                if ignored_path(name, rules) and name not in PACKAGER_SUPPORT:
+                    continue
+                archive.extract(member, path=staging, filter='data')
+        if process.wait() != 0:
+            raise subprocess.CalledProcessError(process.returncode, process.args)
+    except BaseException:
+        if process.poll() is None:
+            process.terminate()
+        process.wait()
+        raise
+    finally:
+        if process.stdout:
+            process.stdout.close()
+
+
+def filter_installable_archive(package, rules):
+    """Apply .modkitignore to the generated ZIP and rebuild its embedded sums."""
+    filtered = package.with_name(package.stem + '.filtered.zip')
+    sums = []
+    try:
+        with zipfile.ZipFile(package, 'r') as source, zipfile.ZipFile(
+                filtered, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as output:
+            seen = set()
+            for info in source.infolist():
+                name = info.filename
+                if name in seen:
+                    raise ValueError(f'duplicate packager ZIP member: {name!r}')
+                seen.add(name)
+                if (info.is_dir() or name == 'SHA256SUMS.txt'
+                        or ignored_path(name, rules)):
+                    continue
+                target = zipfile.ZipInfo(name, info.date_time)
+                target.compress_type = zipfile.ZIP_DEFLATED
+                target.external_attr = info.external_attr
+                digest = hashlib.sha256()
+                with source.open(info) as incoming, output.open(target, 'w') as outgoing:
+                    while chunk := incoming.read(CHUNK):
+                        digest.update(chunk)
+                        outgoing.write(chunk)
+                sums.append((name, digest.hexdigest()))
+            sums_text = ''.join(f'{digest}  {name}\n' for name, digest in sorted(sums))
+            output.writestr('SHA256SUMS.txt', sums_text.encode('utf-8'))
+        filtered.replace(package)
+    finally:
+        if filtered.exists():
+            filtered.unlink()
 
 
 def build(source, source_sha, version, out):
@@ -28,14 +115,12 @@ def build(source, source_sha, version, out):
         ['git', '-C', str(source), 'rev-parse', source_sha + '^{commit}'], text=True).strip()
     if actual != source_sha:
         raise ValueError('source SHA must identify a commit exactly')
-    archive = subprocess.check_output(['git', '-C', str(source), 'archive', source_sha])
+    rules = modkitignore_rules(source, source_sha)
     with tempfile.TemporaryDirectory(prefix='legends-package-') as directory:
         staging = Path(directory) / 'source'
         staging.mkdir()
-        with io.BytesIO(archive) as source_archive, tarfile.open(fileobj=source_archive) as tar:
-            tar.extractall(staging, filter='data')
-        del archive  # Release the source buffer before the source-owned packager runs.
-        for name in ('.github', '.git', '.gitattributes', '.gitignore', '.luarc.json'):
+        extract_installable_source(source, source_sha, staging, rules)
+        for name in ALWAYS_EXCLUDED:
             target = staging / name
             if target.is_symlink() or target.is_file():
                 target.unlink()
@@ -57,6 +142,7 @@ def build(source, source_sha, version, out):
         subprocess.run([sys.executable, 'tools/package.py', '--out', str(built)],
                        cwd=staging, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         package = built / f'stadium_realtime_combat_{version}.zip'
+        filter_installable_archive(package, rules)
         verify(package, version)
         data = package.read_bytes()
         if not data:

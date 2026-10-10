@@ -345,7 +345,12 @@ invokes host cleanup immediately; the host forcibly
 removes the named container after success or failure before a publication step
 can proceed. Host-side validation checks the output after container exit.
 
-The archive verifier rejects sensitive path components at every depth, including
+The source archive is streamed into temporary storage and applies the pinned
+source's `.modkitignore` rules before invoking its packager. The packager support
+files needed for that invocation are retained only in the isolated staging tree;
+the resulting installable ZIP is filtered by the same rules and its embedded
+checksums are rebuilt before verification. The archive verifier rejects
+sensitive path components at every depth, including
 .env variants, .npmrc, .ssh, .aws/credentials and private-key suffixes. The limits
 are 128 MiB compressed, 512 MiB total uncompressed, 64 MiB per ordinary member,
 10,000 members and an 8 MiB central directory. Metadata has smaller caps:

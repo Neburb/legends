@@ -43,6 +43,11 @@ class Packaging(unittest.TestCase):
         source = root / 'source'; source.mkdir(); (source / 'tools').mkdir()
         (source / '.github').mkdir(); (source / '.github/secret.txt').write_text('excluded')
         (source / '.gitignore').write_text('excluded')
+        (source / '.modkitignore').write_text('docs/\ntests/\ntools/\n.modkitignore\n')
+        for directory in ('docs', 'tests'):
+            (source / directory).mkdir()
+            (source / directory / 'development.txt').write_text('development-only evidence')
+        (source / 'tools/dev_helper.py').write_text('development-only tool')
         (source / 'manifest.json').write_text(json.dumps(dict(
             id='stadium_realtime_combat', entry='main.lua', version='0.0.1', github='private')))
         (source / 'main.lua').write_text('mod.exports.version = "0.0.1"\n')
@@ -83,7 +88,12 @@ class Packaging(unittest.TestCase):
             verify(package, VERSION)
             with zipfile.ZipFile(package) as z:
                 self.assertEqual(z.read('payload.txt'), b'committed source')
-                self.assertFalse(any(n.startswith('.github/') or n == '.gitignore' for n in z.namelist()))
+                names = set(z.namelist())
+                self.assertFalse(any(n.startswith(('.github/', 'docs/', 'tests/', 'tools/'))
+                                     or n in {'.gitignore', '.modkitignore'} for n in names))
+                self.assertIn('SHA256SUMS.txt', names)
+                sums = z.read('SHA256SUMS.txt').decode().splitlines()
+                self.assertEqual(len(sums), len(names) - 1)
             self.assertEqual((source / 'payload.txt').read_text(), 'uncommitted work must be ignored')
             self.assertEqual((root / 'dist/SHA256SUMS.txt').read_bytes(),
                              (hashlib.sha256(package.read_bytes()).hexdigest() + '  ' + package.name + '\n').encode())
