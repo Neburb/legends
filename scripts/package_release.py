@@ -18,7 +18,10 @@ import zipfile
 from verify_release_archive import verify
 
 
-PACKAGER_SUPPORT = {'tools/package.py', 'tools/check_engine_compatibility.py'}
+PACKAGER_SUPPORT = {
+    'tools/package.py', 'tools/check_engine_compatibility.py',
+    'docs/IMPLEMENTATION_STATUS.md', 'docs/FORMAT_NOTES.md',
+}
 ALWAYS_EXCLUDED = {'.github', '.git', '.gitattributes', '.gitignore', '.luarc.json', '.modkitignore'}
 CHUNK = 64 * 1024
 

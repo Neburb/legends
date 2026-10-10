@@ -25,6 +25,7 @@ PACKAGER = '''import argparse, hashlib, pathlib, zipfile
 p=argparse.ArgumentParser();p.add_argument('--out');a=p.parse_args()
 r=pathlib.Path('.');out=pathlib.Path(a.out);out.mkdir(parents=True)
 files={str(p).replace('\\\\','/'):p.read_bytes() for p in r.rglob('*') if p.is_file()}
+assert 'docs/IMPLEMENTATION_STATUS.md' in files and 'docs/FORMAT_NOTES.md' in files
 sums=''.join(hashlib.sha256(data).hexdigest()+'  '+name+'\\n' for name,data in sorted(files.items()))
 files['SHA256SUMS.txt']=sums.encode()
 import json
@@ -47,6 +48,8 @@ class Packaging(unittest.TestCase):
         for directory in ('docs', 'tests'):
             (source / directory).mkdir()
             (source / directory / 'development.txt').write_text('development-only evidence')
+        (source / 'docs/IMPLEMENTATION_STATUS.md').write_text('packager input only')
+        (source / 'docs/FORMAT_NOTES.md').write_text('packager input only')
         (source / 'tools/dev_helper.py').write_text('development-only tool')
         (source / 'manifest.json').write_text(json.dumps(dict(
             id='stadium_realtime_combat', entry='main.lua', version='0.0.1', github='private')))
