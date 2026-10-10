@@ -98,7 +98,10 @@ def filter_installable_archive(package, rules):
                         outgoing.write(chunk)
                 sums.append((name, digest.hexdigest()))
             sums_text = ''.join(f'{digest}  {name}\n' for name, digest in sorted(sums))
-            output.writestr('SHA256SUMS.txt', sums_text.encode('utf-8'))
+            sums_info = zipfile.ZipInfo('SHA256SUMS.txt', (2026, 9, 16, 0, 0, 0))
+            sums_info.compress_type = zipfile.ZIP_DEFLATED
+            sums_info.external_attr = 0o100644 << 16
+            output.writestr(sums_info, sums_text.encode('utf-8'))
         filtered.replace(package)
     finally:
         if filtered.exists():
