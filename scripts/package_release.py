@@ -108,6 +108,23 @@ def filter_installable_archive(package, rules):
             filtered.unlink()
 
 
+def run_packager(command, staging):
+    process = subprocess.Popen(command, cwd=staging, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE)
+    tail = bytearray()
+    try:
+        while chunk := process.stderr.read(CHUNK):
+            tail.extend(chunk)
+            if len(tail) > 16 * 1024:
+                del tail[:-16 * 1024]
+        code = process.wait()
+    finally:
+        process.stderr.close()
+    if code:
+        detail = tail.decode('utf-8', errors='replace').strip()
+        raise RuntimeError(f'private packager exited with status {code}: {detail or "no diagnostics"}')
+
+
 def build(source, source_sha, version, out):
     if not re.fullmatch(r'[0-9a-f]{40}', source_sha):
         raise ValueError('source SHA must be 40 lowercase hex characters')
@@ -142,8 +159,7 @@ def build(source, source_sha, version, out):
             raise ValueError('main.lua mod version declaration not found')
         main_path.write_text(stamped, encoding='utf-8', newline='\n')
         built = Path(directory) / 'dist'
-        subprocess.run([sys.executable, 'tools/package.py', '--out', str(built)],
-                       cwd=staging, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run_packager([sys.executable, 'tools/package.py', '--out', str(built)], staging)
         package = built / f'stadium_realtime_combat_{version}.zip'
         filter_installable_archive(package, rules)
         verify(package, version)

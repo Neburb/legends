@@ -23,7 +23,7 @@ class HostGates(unittest.TestCase):
     def execute(self, data, out, downloaded=None, timeout=False, code=0):
         captured=[]
         class Process:
-            stdout=io.BytesIO(data);returncode=None
+            stdout=io.BytesIO(data);stderr=io.BytesIO(b'fixture diagnostic');returncode=None
             def poll(self):return self.returncode
             def wait(self, **options):
                 if self.returncode is None:self.returncode=code
@@ -82,7 +82,8 @@ class HostGates(unittest.TestCase):
 
     def test_container_failure_never_publishes_output(self):
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaises(subprocess.CalledProcessError):self.execute(fixture(),Path(directory)/'dist',code=1)
+            with self.assertRaisesRegex(RuntimeError,'fixture diagnostic'):
+                self.execute(fixture(),Path(directory)/'dist',code=1)
             self.assertFalse((Path(directory)/'dist').exists())
 
     def test_recovery_and_source_proof_use_only_isolated_entry(self):

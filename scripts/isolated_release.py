@@ -45,7 +45,15 @@ def isolated_build(source, source_sha, version, out, downloaded=None):
     name = 'legends-package-' + uuid.uuid4().hex
     command = container_command(source, source_sha, version, name)
     process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL)
+                               stderr=subprocess.PIPE)
+    stderr_tail = bytearray()
+    def collect_stderr():
+        while chunk := process.stderr.read(8192):
+            stderr_tail.extend(chunk)
+            if len(stderr_tail) > 16 * 1024:
+                del stderr_tail[:-16 * 1024]
+    stderr_reader = threading.Thread(target=collect_stderr, daemon=True)
+    stderr_reader.start()
     expired = threading.Event()
     def timeout():
         if process.poll() is None:
@@ -58,7 +66,9 @@ def isolated_build(source, source_sha, version, out, downloaded=None):
         if expired.is_set():
             raise subprocess.TimeoutExpired(command, 300)
         if code:
-            raise subprocess.CalledProcessError(code, command)
+            detail = stderr_tail.decode('utf-8', errors='replace').strip()
+            raise RuntimeError(f'isolated package container exited with status {code}: '
+                               f'{detail or "no diagnostics"}')
     finally:
         timer.cancel()
         # A killed CLI does not stop its container; drain it on every exit path.
@@ -72,7 +82,8 @@ def isolated_build(source, source_sha, version, out, downloaded=None):
         finally:
             if process.poll() is None:
                 process.kill()
-            process.wait(timeout=30); process.stdout.close(); timer.join()
+            process.wait(timeout=30); process.stdout.close(); stderr_reader.join(timeout=30)
+            process.stderr.close(); timer.join()
     verify(io.BytesIO(data), version)
     if downloaded is not None:
         if data != downloaded:
